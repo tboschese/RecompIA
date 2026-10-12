@@ -51,7 +51,10 @@ def run_analysis(args) -> int:
 
     paths = list(args.trace or [])
     if not args.trace:
-        paths += [p for p in [out / "trace.bin", *sorted(out.glob("*.cdl"))] if p.exists()]
+        candidates = [out / "trace.bin", *sorted(out.glob("*.cdl"))]
+        if "app" in game:
+            candidates.append(Path.home() / "Library" / "Application Support" / "RemakeIA" / game["app"]["title"] / "trace.bin")
+        paths += [p for p in candidates if p.exists()]
     trace = None
     for path in paths:
         loaded = trace_module.load(path, len(rom.data))

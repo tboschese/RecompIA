@@ -1,6 +1,19 @@
 {
-  "name": "Chrono Trigger (USA)",
-  "sha1": "de5822f4f2f7a55acb8926d4c0eaa63d5d989312",
-  "entries": [],
-  "labels": {}
+ "name": "Chrono Trigger (USA)",
+ "sha1": "de5822f4f2f7a55acb8926d4c0eaa63d5d989312",
+ "app": {
+  "title": "Chrono Trigger",
+  "id": "chrono-trigger",
+  "version": "0.1.0",
+  "icon_seconds": 30,
+  "options": {
+   "snes9x_aspect": "4:3",
+   "snes9x_overscan": "enabled",
+   "snes9x_mode7_hires": "4x_hv",
+   "snes9x_mode7_hires_bilinear": "stable",
+   "snes9x_reduce_sprite_flicker": "enabled"
+  }
+ },
+ "entries": [],
+ "labels": {}
 }

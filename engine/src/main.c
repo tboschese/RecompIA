@@ -1,13 +1,20 @@
-/* Minimal libretro player (SDL2) used to play a game while the tracer core records what runs.
+/* RemakeIA engine: runs a game project on the desktop (macOS first; Android later through SDL2).
  *
- *   player CORE ROM SAVE_DIR [FRAMES]
+ * Today the SNES hardware comes from a libretro core (snes9x with snesre's tracer); the plan is to
+ * replace its CPU, function by function, with the recompiled game code, while this layer grows the
+ * enhancements (interpolated motion, layered rendering, widescreen).
  *
- * With FRAMES it runs headless as fast as possible for that many frames, tapping Start now and
- * then, which is enough to record the boot, intro and title screen.
+ *   engine                              inside an .app: Resources/{core.dylib, game.sfc, game.cfg}
+ *   engine CORE ROM DATA_DIR [FRAMES]   development; with FRAMES, runs headless (records the intro)
  *
- * Battery save (.srm) and the quick save state live in SAVE_DIR, so sessions continue where
- * they stopped. Keys: arrows, Z=B X=A A=Y S=X Q=L W=R, Enter=Start, Right Shift=Select,
- * Tab (hold)=fast forward, F5=save state, F7=load state, Esc=quit. Gamepads use the SNES layout.
+ * game.cfg has `key=value` lines: `title` names the window and the save folder, every other key is
+ * passed to the core as an option (e.g. snes9x_mode7_hires=4x_hv).
+ *
+ * Saves (cartridge battery, resume point, quick state) and the execution trace live in DATA_DIR, by
+ * default ~/Library/Application Support/RemakeIA/<title>/.
+ *
+ * Keys: arrows, Z=B X=A A=Y S=X Q=L W=R, Enter=Start, Right Shift=Select, Tab (hold)=fast forward,
+ * F5=quick save, F7=quick load, F11 or Cmd+F=fullscreen. Gamepads use the SNES layout.
  */
 
 #include <SDL.h>
@@ -21,6 +28,8 @@
 #define ENV_GET_CAN_DUPE 3
 #define ENV_GET_SYSTEM_DIRECTORY 9
 #define ENV_SET_PIXEL_FORMAT 10
+#define ENV_GET_VARIABLE 15
+#define ENV_GET_VARIABLE_UPDATE 17
 #define ENV_GET_SAVE_DIRECTORY 31
 #define ENV_EXPERIMENTAL 0x10000
 #define DEVICE_JOYPAD 1
@@ -28,6 +37,8 @@
 #define PIXEL_0RGB1555 0
 #define PIXEL_XRGB8888 1
 #define PIXEL_RGB565 2
+#define MAX_OPTIONS 64
+#define PATH 4096
 
 enum { B, Y, SELECT, START, UP, DOWN, LEFT, RIGHT, A, X, L, R, BUTTONS };
 
@@ -38,6 +49,7 @@ struct av_info {
 	float aspect;
 	double fps, sample_rate;
 };
+struct variable { const char *key, *value; };
 
 static struct {
 	void (*init)(void);
@@ -61,12 +73,16 @@ static struct {
 	void (*trace_save)(void);
 } core;
 
-static char save_dir[4096];
+static char title[256] = "RemakeIA";
+static char *option_keys[MAX_OPTIONS], *option_values[MAX_OPTIONS];
+static int options;
+static char data_dir[PATH];
 static int pixel_format = PIXEL_0RGB1555;
+
 static SDL_Window *window;
 static SDL_Renderer *renderer;
-static SDL_Texture *texture;
-static int texture_w, texture_h, texture_format;
+static SDL_Texture *frame, *upscaled;
+static int frame_w, frame_h, frame_format, upscaled_w, upscaled_h;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
 static SDL_GameController *pad;
@@ -81,29 +97,43 @@ static bool environment(unsigned cmd, void *data)
 		return true;
 	case ENV_GET_SYSTEM_DIRECTORY:
 	case ENV_GET_SAVE_DIRECTORY:
-		*(const char **)data = save_dir;
+		*(const char **)data = data_dir;
 		return true;
 	case ENV_SET_PIXEL_FORMAT:
 		pixel_format = *(const int *)data;
+		return true;
+	case ENV_GET_VARIABLE: {
+		struct variable *var = data;
+		for (int i = 0; i < options; i++)
+			if (var->key && !strcmp(var->key, option_keys[i])) {
+				var->value = option_values[i];
+				return true;
+			}
+		return false;
+	}
+	case ENV_GET_VARIABLE_UPDATE:
+		*(bool *)data = false;
 		return true;
 	default:
 		return false;
 	}
 }
 
+/* Integer nearest-neighbour upscale, then a linear fit to the window: sharp pixels, no shimmer. */
 static void video(const void *data, unsigned width, unsigned height, size_t pitch)
 {
 	if (!data || !renderer)
 		return;
 	int format = pixel_format == PIXEL_XRGB8888 ? SDL_PIXELFORMAT_ARGB8888
 		: pixel_format == PIXEL_RGB565 ? SDL_PIXELFORMAT_RGB565 : SDL_PIXELFORMAT_ARGB1555;
-	if (!texture || texture_w != (int)width || texture_h != (int)height || texture_format != format) {
-		if (texture)
-			SDL_DestroyTexture(texture);
-		texture = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING, width, height);
-		texture_w = width, texture_h = height, texture_format = format;
+	if (!frame || frame_w != (int)width || frame_h != (int)height || frame_format != format) {
+		if (frame)
+			SDL_DestroyTexture(frame);
+		frame = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING, width, height);
+		SDL_SetTextureScaleMode(frame, SDL_ScaleModeNearest);
+		frame_w = width, frame_h = height, frame_format = format;
 	}
-	SDL_UpdateTexture(texture, NULL, data, (int)pitch);
+	SDL_UpdateTexture(frame, NULL, data, (int)pitch);
 
 	int w, h;
 	SDL_GetRendererOutputSize(renderer, &w, &h);
@@ -112,9 +142,23 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 		dst.w = (int)(h * aspect), dst.x = (w - dst.w) / 2;
 	else
 		dst.h = (int)(w / aspect), dst.y = (h - dst.h) / 2;
+
+	int scale_x = (dst.w + width - 1) / width, scale_y = (dst.h + height - 1) / height;
+	int up_w = width * (scale_x > 1 ? scale_x : 1), up_h = height * (scale_y > 1 ? scale_y : 1);
+	if (!upscaled || upscaled_w != up_w || upscaled_h != up_h) {
+		if (upscaled)
+			SDL_DestroyTexture(upscaled);
+		upscaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, up_w, up_h);
+		SDL_SetTextureScaleMode(upscaled, SDL_ScaleModeLinear);
+		upscaled_w = up_w, upscaled_h = up_h;
+	}
+	SDL_SetRenderTarget(renderer, upscaled);
+	SDL_RenderCopy(renderer, frame, NULL, NULL);
+	SDL_SetRenderTarget(renderer, NULL);
+
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, texture, NULL, &dst);
+	SDL_RenderCopy(renderer, upscaled, NULL, &dst);
 	SDL_RenderPresent(renderer);
 }
 
@@ -127,8 +171,8 @@ static size_t audio_batch(const int16_t *data, size_t frames)
 
 static void audio_sample(int16_t left, int16_t right)
 {
-	int16_t frame[2] = { left, right };
-	audio_batch(frame, 1);
+	int16_t sample[2] = { left, right };
+	audio_batch(sample, 1);
 }
 
 static void input_poll(void) {}
@@ -187,7 +231,7 @@ static void *load_file(const char *path, size_t *size)
 
 static void write_file(const char *path, const void *data, size_t size)
 {
-	char tmp[4200];
+	char tmp[PATH + 8];
 	snprintf(tmp, sizeof tmp, "%s.part", path);
 	FILE *f = fopen(tmp, "wb");
 	if (!f)
@@ -214,30 +258,87 @@ static void save_state(const char *path)
 	free(data);
 }
 
-static void load_state(const char *path)
+static bool load_state(const char *path)
 {
 	size_t size;
 	void *data = load_file(path, &size);
-	if (data)
-		core.unserialize(data, size);
+	bool ok = data && core.unserialize(data, size);
 	free(data);
+	return ok;
+}
+
+static void read_config(const char *path)
+{
+	size_t size;
+	char *text = load_file(path, &size);
+	if (!text)
+		return;
+	text = realloc(text, size + 1);
+	text[size] = 0;
+	for (char *line = strtok(text, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq)
+			continue;
+		*eq = 0;
+		if (!strcmp(line, "title"))
+			snprintf(title, sizeof title, "%s", eq + 1);
+		else if (options < MAX_OPTIONS)
+			option_keys[options] = strdup(line), option_values[options++] = strdup(eq + 1);
+	}
+	free(text);
+}
+
+static void fail(const char *message)
+{
+	fprintf(stderr, "%s\n", message);
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, message, NULL);
+	exit(1);
 }
 
 #define LOAD(field, name) \
-	if (!(*(void **)&core.field = dlsym(lib, name))) { fprintf(stderr, "núcleo sem %s\n", name); return 1; }
+	if (!(*(void **)&core.field = dlsym(lib, name))) fail("núcleo incompleto: falta " name);
 
 int main(int argc, char **argv)
 {
-	if (argc != 4 && argc != 5) {
-		fprintf(stderr, "uso: %s NÚCLEO ROM PASTA_DE_SAVES [QUADROS]\n", argv[0]);
+	char core_path[PATH], rom_path[PATH];
+	long headless_frames = 0;
+
+	if (argc == 1) {
+		char *base = SDL_GetBasePath();
+		if (!base)
+			fail("não achei a pasta de recursos do aplicativo");
+		char config[PATH];
+		snprintf(config, sizeof config, "%sgame.cfg", base);
+		snprintf(core_path, sizeof core_path, "%score.dylib", base);
+		snprintf(rom_path, sizeof rom_path, "%sgame.sfc", base);
+		read_config(config);
+		SDL_free(base);
+		char *pref = SDL_GetPrefPath("RemakeIA", title);
+		if (!pref)
+			fail("não consegui criar a pasta de saves");
+		snprintf(data_dir, sizeof data_dir, "%s", pref);
+		SDL_free(pref);
+		size_t len = strlen(data_dir);
+		if (len && data_dir[len - 1] == '/')
+			data_dir[len - 1] = 0;
+		if (!getenv("SNESRE_TRACE")) {
+			char trace[PATH + 16];
+			snprintf(trace, sizeof trace, "%s/trace.bin", data_dir);
+			setenv("SNESRE_TRACE", trace, 1);
+		}
+	} else if (argc == 4 || argc == 5) {
+		snprintf(core_path, sizeof core_path, "%s", argv[1]);
+		snprintf(rom_path, sizeof rom_path, "%s", argv[2]);
+		snprintf(data_dir, sizeof data_dir, "%s", argv[3]);
+		headless_frames = argc == 5 ? atol(argv[4]) : 0;
+	} else {
+		fprintf(stderr, "uso: %s [NÚCLEO ROM PASTA_DE_DADOS [QUADROS]]\n", argv[0]);
 		return 2;
 	}
-	long headless_frames = argc == 5 ? atol(argv[4]) : 0;
-	void *lib = dlopen(argv[1], RTLD_NOW);
-	if (!lib) {
-		fprintf(stderr, "%s\n", dlerror());
-		return 1;
-	}
+
+	void *lib = dlopen(core_path, RTLD_NOW);
+	if (!lib)
+		fail(dlerror());
 	LOAD(init, "retro_init") LOAD(deinit, "retro_deinit") LOAD(set_environment, "retro_set_environment")
 	LOAD(set_video_refresh, "retro_set_video_refresh") LOAD(set_audio_sample, "retro_set_audio_sample")
 	LOAD(set_audio_sample_batch, "retro_set_audio_sample_batch") LOAD(set_input_poll, "retro_set_input_poll")
@@ -248,15 +349,13 @@ int main(int argc, char **argv)
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
 
-	snprintf(save_dir, sizeof save_dir, "%s", argv[3]);
-	char battery_path[4200], state_path[4200];
-	snprintf(battery_path, sizeof battery_path, "%s/game.srm", save_dir);
-	snprintf(state_path, sizeof state_path, "%s/quick.state", save_dir);
+	char battery_path[PATH + 16], resume_path[PATH + 16], quick_path[PATH + 16];
+	snprintf(battery_path, sizeof battery_path, "%s/game.srm", data_dir);
+	snprintf(resume_path, sizeof resume_path, "%s/resume.state", data_dir);
+	snprintf(quick_path, sizeof quick_path, "%s/quick.state", data_dir);
 
-	if (SDL_Init(headless_frames ? 0 : SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
-		fprintf(stderr, "SDL: %s\n", SDL_GetError());
-		return 1;
-	}
+	if (SDL_Init(headless_frames ? 0 : SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0)
+		fail(SDL_GetError());
 	core.set_environment(environment);
 	core.init();
 	core.set_video_refresh(video);
@@ -268,12 +367,10 @@ int main(int argc, char **argv)
 	struct system_info system = { 0 };
 	core.get_system_info(&system);
 	size_t rom_size = 0;
-	void *rom = system.need_fullpath ? NULL : load_file(argv[2], &rom_size);
-	struct game_info game = { argv[2], rom, rom_size, NULL };
-	if (!core.load_game(&game)) {
-		fprintf(stderr, "o núcleo não conseguiu abrir o jogo\n");
-		return 1;
-	}
+	void *rom = system.need_fullpath ? NULL : load_file(rom_path, &rom_size);
+	struct game_info game = { rom_path, rom, rom_size, NULL };
+	if ((!rom && !system.need_fullpath) || !core.load_game(&game))
+		fail("não consegui abrir o jogo");
 
 	size_t battery_size;
 	void *battery = load_file(battery_path, &battery_size);
@@ -288,8 +385,8 @@ int main(int argc, char **argv)
 	double fps = av.fps > 0 ? av.fps : 60.0;
 
 	if (headless_frames) {
-		for (long frame = 0; frame < headless_frames; frame++) {
-			buttons[START] = frame % 120 < 4;
+		for (long i = 0; i < headless_frames; i++) {
+			buttons[START] = i % 120 < 4;
 			core.run();
 		}
 		save_battery(battery_path);
@@ -299,10 +396,14 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	window = SDL_CreateWindow("snesre — jogando com rastreamento", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+	if (argc == 1)
+		load_state(resume_path);
+
+	window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
 		(int)(224 * 3 * aspect), 224 * 3, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
+	if (!window || !renderer)
+		fail(SDL_GetError());
 
 	SDL_AudioSpec want = { 0 }, have;
 	want.freq = av.sample_rate > 0 ? (int)av.sample_rate : 32040;
@@ -315,7 +416,7 @@ int main(int argc, char **argv)
 
 	Uint64 frequency = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter();
 	Uint32 last_save = SDL_GetTicks();
-	bool running = true;
+	bool running = true, paused = false;
 	while (running) {
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
@@ -323,14 +424,26 @@ int main(int argc, char **argv)
 				running = false;
 			else if (event.type == SDL_CONTROLLERDEVICEADDED && !pad)
 				pad = SDL_GameControllerOpen(event.cdevice.which);
+			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+				paused = true, SDL_PauseAudioDevice(audio, 1);
+			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
+				paused = false, SDL_PauseAudioDevice(audio, 0), next = SDL_GetPerformanceCounter();
 			else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
-				if (event.key.keysym.sym == SDLK_ESCAPE)
-					running = false;
-				else if (event.key.keysym.sym == SDLK_F5)
-					save_state(state_path);
-				else if (event.key.keysym.sym == SDLK_F7)
-					load_state(state_path);
+				SDL_Keycode sym = event.key.keysym.sym;
+				if (sym == SDLK_F5)
+					save_state(quick_path);
+				else if (sym == SDLK_F7)
+					load_state(quick_path);
+				else if (sym == SDLK_F11 || (sym == SDLK_f && (event.key.keysym.mod & KMOD_GUI))) {
+					bool full = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+					SDL_SetWindowFullscreen(window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+					SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
+				}
 			}
+		}
+		if (paused) {
+			SDL_Delay(30);
+			continue;
 		}
 		read_input();
 		core.run();
@@ -355,6 +468,8 @@ int main(int argc, char **argv)
 	}
 
 	save_battery(battery_path);
+	if (argc == 1)
+		save_state(resume_path);
 	core.unload_game();
 	core.deinit();
 	SDL_Quit();

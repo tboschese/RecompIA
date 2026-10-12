@@ -1,7 +1,7 @@
-"""Builds and runs the tracing player: snes9x (libretro) with snesre's tracer, plus a small SDL2 frontend.
+"""Builds and runs the tracing player: snes9x (libretro) with snesre's tracer, run by the RemakeIA engine.
 
 Everything is built once from source and cached in ~/.snesre, keyed by the snes9x commit and a hash
-of our sources, so editing the tracer rebuilds it automatically.
+of our sources, so editing the tracer or the engine rebuilds it automatically.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Optional
 SNES9X_REPO = "https://github.com/libretro/snes9x.git"
 SNES9X_COMMIT = "fae2fea08f74180759ef540ee94259213f503480"
 SOURCES = Path(__file__).resolve().parent.parent / "tracer"
+ENGINE = Path(__file__).resolve().parents[3] / "engine" / "src" / "main.c"
 CORE_FILES = ("snesre_trace.cpp", "snesre_trace.h")
 
 
@@ -25,10 +26,10 @@ def home() -> Path:
     return Path(os.environ.get("SNESRE_HOME", Path.home() / ".snesre"))
 
 
-def _digest(*names: str) -> str:
+def _digest(*paths) -> str:
     h = hashlib.sha256()
-    for name in names:
-        h.update((SOURCES / name).read_bytes())
+    for path in paths:
+        h.update((SOURCES / path).read_bytes())
     return h.hexdigest()[:12]
 
 
@@ -64,22 +65,22 @@ def core_path() -> Path:
     return target
 
 
-def player_path() -> Path:
-    target = home() / "bin" / f"player-{_digest('player.c')}"
+def engine_path() -> Path:
+    target = home() / "bin" / f"engine-{_digest(ENGINE)}"
     if target.exists():
         return target
     if not shutil.which("sdl2-config"):
         raise RuntimeError("SDL2 não encontrado. No macOS: brew install sdl2")
-    print("Compilando o player…", file=sys.stderr)
+    print("Compilando o motor…", file=sys.stderr)
     flags = subprocess.run(["sdl2-config", "--cflags", "--libs"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
     target.parent.mkdir(parents=True, exist_ok=True)
-    _run(["cc", "-O2", "-std=c11", "-o", str(target), str(SOURCES / "player.c"), *flags])
+    _run(["cc", "-O2", "-std=c11", "-Wall", "-o", str(target), str(ENGINE), *flags])
     return target
 
 
 def play(rom: Path, trace: Path, saves: Path, frames: Optional[int] = None) -> int:
     """Opens the game in a window; with `frames`, runs headless for that many frames instead."""
-    core, player = core_path(), player_path()
+    core, player = core_path(), engine_path()
     saves.mkdir(parents=True, exist_ok=True)
     trace.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SNESRE_TRACE=str(trace.resolve()))

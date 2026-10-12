@@ -1,4 +1,4 @@
-"""Writes 8-bit RGB PNG files without third-party dependencies."""
+"""Writes 8-bit RGB or RGBA PNG files without third-party dependencies."""
 
 from __future__ import annotations
 
@@ -7,12 +7,14 @@ import zlib
 from pathlib import Path
 from typing import List, Tuple
 
-Rows = List[List[Tuple[int, int, int]]]
+Rows = List[List[Tuple[int, ...]]]
 
 
 def write(path: Path, rows: Rows) -> None:
+    """Pixels are (r, g, b) or (r, g, b, a) tuples."""
     height = len(rows)
     width = len(rows[0])
+    channels = len(rows[0][0])
     raw = b"".join(b"\x00" + bytes(channel for pixel in row for channel in pixel) for row in rows)
 
     def chunk(kind: bytes, data: bytes) -> bytes:
@@ -20,7 +22,7 @@ def write(path: Path, rows: Rows) -> None:
 
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6 if channels == 4 else 2, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
