@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rom2apk"
+version = "0.1.0"
+description = "Transforma ROMs de videogame em APKs Android jogáveis"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+rom2apk = "rom2apk.cli:main"
+
+[tool.setuptools]
+packages = ["rom2apk"]
