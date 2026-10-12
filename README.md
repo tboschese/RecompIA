@@ -1,4 +1,4 @@
-# rom2apk
+# RemakeIA
 
 Versões recompiladas e refeitas de jogos clássicos para Android: o código original é analisado e traduzido para código nativo, e a partir daí o jogo ganha melhorias que um emulador não consegue dar — movimento interpolado para telas de 90/120 Hz, camadas com profundidade e paralaxe, widescreen e áudio remasterizado.
 
