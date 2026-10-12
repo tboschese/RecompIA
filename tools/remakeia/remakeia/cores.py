@@ -2,6 +2,9 @@
 
 - snes9x: snes9x with snesre's execution tracer (playing the app feeds the analysis).
 - bsnes-hd: bsnes-hd beta, for sharp HD Mode 7 and widescreen.
+
+Also the community gamepad database (SDL_GameControllerDB, zlib license), so USB and Bluetooth
+gamepads SDL doesn't know by itself get the SNES layout out of the box.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from . import TOOLS  # noqa: F401  (puts snesre on the path)
@@ -18,6 +22,8 @@ from snesre import tracer
 
 BSNES_HD_REPO = "https://github.com/DerKoun/bsnes-hd.git"
 BSNES_HD_COMMIT = "fc26b25ea236f0f877f0265d2a2c37dfd93dfde9"
+CONTROLLER_DB_COMMIT = "c1d5289a1f713b30a2c121e9fe6529d39360be0f"
+CONTROLLER_DB_URL = f"https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/{CONTROLLER_DB_COMMIT}/gamecontrollerdb.txt"
 
 
 def _run(cmd, cwd: Path) -> None:
@@ -52,3 +58,16 @@ def core_path(name: str) -> Path:
     if name == "bsnes-hd":
         return bsnes_hd_path()
     raise RuntimeError(f"núcleo desconhecido: {name} (use snes9x ou bsnes-hd)")
+
+
+def controller_db_path() -> Path:
+    target = tracer.home() / "cores" / f"gamecontrollerdb-{CONTROLLER_DB_COMMIT[:12]}.txt"
+    if not target.exists():
+        print("Baixando a base de controles USB…", file=sys.stderr)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(CONTROLLER_DB_URL, timeout=60) as response:
+            data = response.read()
+        partial = target.with_suffix(".part")
+        partial.write_bytes(data)
+        partial.replace(target)
+    return target

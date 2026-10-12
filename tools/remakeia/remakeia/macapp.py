@@ -1,4 +1,4 @@
-"""Packages a game project as a macOS app: engine + core + SDL2 + the user's ROM + icon."""
+"""Packages a game project as a macOS app: engine + core + SDL2 + gamepad database + the user's ROM + icon."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
     shutil.copy(core, resources / "core.dylib")
     (resources / "game.sfc").write_bytes(rom.data)
     shutil.copytree(tracer.ENGINE / "shaders", resources / "shaders")
+    shutil.copy(cores.controller_db_path(), resources / "gamecontrollerdb.txt")
     config = [f"title={app['title']}", f"video={app.get('video', 'pixel')}"]
     config += [f"{key}={value}" for key, value in app.get("options", {}).items()]
     (resources / "game.cfg").write_text("\n".join(config) + "\n")

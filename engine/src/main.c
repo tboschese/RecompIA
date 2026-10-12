@@ -11,11 +11,13 @@
  * look (pixel, crt; see video.c), every other key is passed to the core as an option
  * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMAKEIA_SHADERS.
  *
- * Saves (cartridge battery, resume point, quick state) and the execution trace live in DATA_DIR, by
- * default ~/Library/Application Support/RemakeIA/<title>/.
+ * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
+ * live in DATA_DIR, by default ~/Library/Application Support/RemakeIA/<title>/.
  *
- * Keys: arrows, Z=B X=A A=Y S=X Q=L W=R, Enter=Start, Right Shift=Select, Tab (hold)=fast forward,
- * F2=next look, F5=quick save, F7=quick load, F11 or Cmd+F=fullscreen. Gamepads use the SNES layout.
+ * Controls: keyboard and gamepads (see input.c), remappable in the pause menu (Esc, the gamepad's
+ * Home button or Select+Start), which also saves and loads the state slots (see menu.c).
+ * Shortcuts: Tab (hold)=fast forward, F2=next look, F5=save to the current slot, F7=load it,
+ * F11 or Cmd+F=fullscreen.
  */
 
 #include <SDL.h>
@@ -26,6 +28,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/stat.h>
+#include <time.h>
+
+#include "input.h"
+#include "menu.h"
 #include "video.h"
 
 #define ENV_GET_CAN_DUPE 3
@@ -40,8 +47,6 @@
 #define MAX_OPTIONS 64
 #define FAST_FORWARD_FRAMES 4
 #define PATH 4096
-
-enum { B, Y, SELECT, START, UP, DOWN, LEFT, RIGHT, A, X, L, R, BUTTONS };
 
 struct game_info { const char *path; const void *data; size_t size; const char *meta; };
 struct system_info { const char *name, *version, *extensions; bool need_fullpath, block_extract; };
@@ -84,9 +89,9 @@ static SDL_Window *window;
 static bool video_ready;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
-static SDL_GameController *pad;
-static bool buttons[BUTTONS];
-static bool fast_forward;
+static bool fast_forward, quit, headless_start;
+static int pixel_format;
+static uint32_t thumb[THUMB_WIDTH * THUMB_HEIGHT];
 
 static bool environment(unsigned cmd, void *data)
 {
@@ -99,7 +104,8 @@ static bool environment(unsigned cmd, void *data)
 		*(const char **)data = data_dir;
 		return true;
 	case ENV_SET_PIXEL_FORMAT:
-		video_set_format(*(const int *)data);
+		pixel_format = *(const int *)data;
+		video_set_format(pixel_format);
 		return true;
 	case ENV_GET_VARIABLE: {
 		struct variable *var = data;
@@ -118,10 +124,38 @@ static bool environment(unsigned cmd, void *data)
 	}
 }
 
+static uint32_t to_rgba(const void *row, unsigned x)
+{
+	unsigned r, g, b;
+	if (pixel_format == VIDEO_XRGB8888) {
+		uint32_t p = ((const uint32_t *)row)[x];
+		r = p >> 16 & 0xFF, g = p >> 8 & 0xFF, b = p & 0xFF;
+	} else if (pixel_format == VIDEO_RGB565) {
+		uint16_t p = ((const uint16_t *)row)[x];
+		r = (p >> 11 & 0x1F) * 255 / 31, g = (p >> 5 & 0x3F) * 255 / 63, b = (p & 0x1F) * 255 / 31;
+	} else {
+		uint16_t p = ((const uint16_t *)row)[x];
+		r = (p >> 10 & 0x1F) * 255 / 31, g = (p >> 5 & 0x1F) * 255 / 31, b = (p & 0x1F) * 255 / 31;
+	}
+	return menu_rgba(r, g, b, 255);
+}
+
+/* Keeps a small copy of the latest frame, saved next to each state as its picture in the menu. */
+static void update_thumb(const void *data, unsigned width, unsigned height, size_t pitch)
+{
+	for (unsigned y = 0; y < THUMB_HEIGHT; y++) {
+		const char *row = (const char *)data + (size_t)((y * 2 + 1) * height / (THUMB_HEIGHT * 2)) * pitch;
+		for (unsigned x = 0; x < THUMB_WIDTH; x++)
+			thumb[y * THUMB_WIDTH + x] = to_rgba(row, (x * 2 + 1) * width / (THUMB_WIDTH * 2));
+	}
+}
+
 static void video(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-	if (data && video_ready)
+	if (data && video_ready) {
 		video_frame(data, width, height, pitch);
+		update_thumb(data, width, height, pitch);
+	}
 }
 
 /* Dynamic rate control: the game runs locked to the display's refresh, which is never exactly the
@@ -186,36 +220,11 @@ static void input_poll(void) {}
 static int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
 {
 	(void)index;
-	return port == 0 && device == DEVICE_JOYPAD && id < BUTTONS && buttons[id];
-}
-
-static void read_input(void)
-{
-	const Uint8 *key = SDL_GetKeyboardState(NULL);
-	static const SDL_Scancode keys[BUTTONS] = {
-		[B] = SDL_SCANCODE_Z, [Y] = SDL_SCANCODE_A, [SELECT] = SDL_SCANCODE_RSHIFT, [START] = SDL_SCANCODE_RETURN,
-		[UP] = SDL_SCANCODE_UP, [DOWN] = SDL_SCANCODE_DOWN, [LEFT] = SDL_SCANCODE_LEFT, [RIGHT] = SDL_SCANCODE_RIGHT,
-		[A] = SDL_SCANCODE_X, [X] = SDL_SCANCODE_S, [L] = SDL_SCANCODE_Q, [R] = SDL_SCANCODE_W,
-	};
-	static const int pad_buttons[BUTTONS] = {
-		[B] = SDL_CONTROLLER_BUTTON_A, [Y] = SDL_CONTROLLER_BUTTON_X, [SELECT] = SDL_CONTROLLER_BUTTON_BACK,
-		[START] = SDL_CONTROLLER_BUTTON_START, [UP] = SDL_CONTROLLER_BUTTON_DPAD_UP,
-		[DOWN] = SDL_CONTROLLER_BUTTON_DPAD_DOWN, [LEFT] = SDL_CONTROLLER_BUTTON_DPAD_LEFT,
-		[RIGHT] = SDL_CONTROLLER_BUTTON_DPAD_RIGHT, [A] = SDL_CONTROLLER_BUTTON_B, [X] = SDL_CONTROLLER_BUTTON_Y,
-		[L] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER, [R] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
-	};
-	for (int i = 0; i < BUTTONS; i++)
-		buttons[i] = key[keys[i]] || (pad && SDL_GameControllerGetButton(pad, pad_buttons[i]));
-	if (pad) {
-		const int dead = 16000;
-		int x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
-		int y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-		buttons[LEFT] |= x < -dead, buttons[RIGHT] |= x > dead;
-		buttons[UP] |= y < -dead, buttons[DOWN] |= y > dead;
-		buttons[L] |= SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > dead;
-		buttons[R] |= SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > dead;
-	}
-	fast_forward = key[SDL_SCANCODE_TAB];
+	if (device != DEVICE_JOYPAD || id >= BUTTONS)
+		return 0;
+	if (headless_start)
+		return port == 0 && id == BTN_START;
+	return input_down((int)port, (int)id);
 }
 
 static void *load_file(const char *path, size_t *size)
@@ -255,13 +264,15 @@ static void save_battery(const char *path)
 		write_file(path, data, size);
 }
 
-static void save_state(const char *path)
+static bool save_state(const char *path)
 {
 	size_t size = core.serialize_size();
 	void *data = malloc(size);
-	if (core.serialize(data, size))
+	bool ok = data && core.serialize(data, size);
+	if (ok)
 		write_file(path, data, size);
 	free(data);
+	return ok;
 }
 
 static bool load_state(const char *path)
@@ -296,7 +307,70 @@ static void read_config(const char *path)
 	free(text);
 }
 
-/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits. */
+static void slot_path(int slot, const char *kind, char *out, size_t size)
+{
+	snprintf(out, size, "%s/slot-%d.%s", data_dir, slot, kind);
+}
+
+static bool save_slot(int slot)
+{
+	char path[PATH + 32];
+	slot_path(slot, "state", path, sizeof path);
+	if (!save_state(path))
+		return false;
+	slot_path(slot, "thumb", path, sizeof path);
+	write_file(path, thumb, sizeof thumb);
+	return true;
+}
+
+static bool load_slot(int slot)
+{
+	char path[PATH + 32];
+	slot_path(slot, "state", path, sizeof path);
+	return load_state(path);
+}
+
+static bool slot_info(int slot, char *when, size_t size, uint32_t *picture)
+{
+	char path[PATH + 32];
+	struct stat st;
+	slot_path(slot, "state", path, sizeof path);
+	if (stat(path, &st) != 0)
+		return false;
+	strftime(when, size, "%d/%m/%Y %H:%M", localtime(&st.st_mtime));
+	slot_path(slot, "thumb", path, sizeof path);
+	size_t got;
+	void *data = load_file(path, &got);
+	if (data && got == sizeof thumb)
+		memcpy(picture, data, got);
+	else
+		memset(picture, 0, sizeof thumb);
+	free(data);
+	return true;
+}
+
+static void update_title(void);
+
+static void toggle_fullscreen(void)
+{
+	bool full = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+	SDL_SetWindowFullscreen(window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+	SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
+}
+
+static void next_look(void)
+{
+	video_next_profile();
+	update_title();
+}
+
+static void request_quit(void)
+{
+	quit = true;
+}
+
+/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits;
+ * REMAKEIA_CAPTURE_MENU=main|save|load|controls shows that menu screen in the capture. */
 static bool capture_mode(void)
 {
 	return getenv("REMAKEIA_CAPTURE") && getenv("REMAKEIA_CAPTURE_FRAME");
@@ -321,7 +395,7 @@ static void fail(const char *message)
 
 int main(int argc, char **argv)
 {
-	char core_path[PATH], rom_path[PATH], shader_dir[PATH] = "";
+	char core_path[PATH], rom_path[PATH], shader_dir[PATH] = "", controller_db[PATH] = "";
 	long headless_frames = 0;
 
 	if (argc == 1) {
@@ -333,6 +407,7 @@ int main(int argc, char **argv)
 		snprintf(core_path, sizeof core_path, "%score.dylib", base);
 		snprintf(rom_path, sizeof rom_path, "%sgame.sfc", base);
 		snprintf(shader_dir, sizeof shader_dir, "%sshaders", base);
+		snprintf(controller_db, sizeof controller_db, "%sgamecontrollerdb.txt", base);
 		read_config(config);
 		SDL_free(base);
 		char *pref = SDL_GetPrefPath("RemakeIA", title);
@@ -363,6 +438,8 @@ int main(int argc, char **argv)
 		snprintf(look, sizeof look, "%s", getenv("REMAKEIA_VIDEO"));
 	if (getenv("REMAKEIA_SHADERS"))
 		snprintf(shader_dir, sizeof shader_dir, "%s", getenv("REMAKEIA_SHADERS"));
+	if (getenv("REMAKEIA_CONTROLLER_DB"))
+		snprintf(controller_db, sizeof controller_db, "%s", getenv("REMAKEIA_CONTROLLER_DB"));
 
 	void *lib = dlopen(core_path, RTLD_NOW);
 	if (!lib)
@@ -377,10 +454,9 @@ int main(int argc, char **argv)
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
 
-	char battery_path[PATH + 16], resume_path[PATH + 16], quick_path[PATH + 16];
+	char battery_path[PATH + 16], resume_path[PATH + 16];
 	snprintf(battery_path, sizeof battery_path, "%s/game.srm", data_dir);
 	snprintf(resume_path, sizeof resume_path, "%s/resume.state", data_dir);
-	snprintf(quick_path, sizeof quick_path, "%s/quick.state", data_dir);
 
 	if (SDL_Init(headless_frames ? 0 : SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0)
 		fail(SDL_GetError());
@@ -414,7 +490,7 @@ int main(int argc, char **argv)
 
 	if (headless_frames) {
 		for (long i = 0; i < headless_frames; i++) {
-			buttons[START] = i % 120 < 4;
+			headless_start = i % 120 < 4;
 			core.run();
 		}
 		save_battery(battery_path);
@@ -440,6 +516,9 @@ int main(int argc, char **argv)
 	if (!video_ready)
 		fail("não consegui iniciar o vídeo (OpenGL e shaders)");
 	update_title();
+	input_init(data_dir, controller_db[0] ? controller_db : NULL);
+	MenuActions actions = { save_slot, load_slot, slot_info, toggle_fullscreen, next_look, video_profile_name, request_quit };
+	menu_init(&actions, title);
 
 	SDL_AudioSpec want = { 0 }, have;
 	want.freq = av.sample_rate > 0 ? (int)av.sample_rate : 32040;
@@ -476,10 +555,10 @@ int main(int argc, char **argv)
 	while (running) {
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
+			if (input_handle_event(&event, menu_toast) || menu_handle_event(&event))
+				continue;
 			if (event.type == SDL_QUIT)
 				running = false;
-			else if (event.type == SDL_CONTROLLERDEVICEADDED && !pad)
-				pad = SDL_GameControllerOpen(event.cdevice.which);
 			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !capture_frame)
 				paused = true, SDL_PauseAudioDevice(audio, 1);
 			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
@@ -489,22 +568,42 @@ int main(int argc, char **argv)
 				if (sym == SDLK_F2) {
 					video_next_profile();
 					update_title();
-				} else if (sym == SDLK_F5)
-					save_state(quick_path);
-				else if (sym == SDLK_F7)
-					load_state(quick_path);
-				else if (sym == SDLK_F11 || (sym == SDLK_f && (event.key.keysym.mod & KMOD_GUI))) {
-					bool full = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
-					SDL_SetWindowFullscreen(window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-					SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
+				} else if (sym == SDLK_F5 || sym == SDLK_F7) {
+					char message[64];
+					int slot = menu_slot();
+					bool saving = sym == SDLK_F5, ok = saving ? save_slot(slot) : load_slot(slot);
+					snprintf(message, sizeof message, ok ? "Slot %d %s" : "Slot %d: falhou ao %s", slot,
+						saving ? (ok ? "salvo" : "salvar") : (ok ? "carregado" : "carregar"));
+					menu_toast(message);
+				} else if (sym == SDLK_F11 || (sym == SDLK_f && (event.key.keysym.mod & KMOD_GUI))) {
+					toggle_fullscreen();
 				}
 			}
 		}
+		if (quit)
+			running = false;
 		if (paused) {
 			SDL_Delay(30);
 			continue;
 		}
-		read_input();
+		input_update();
+		fast_forward = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_TAB];
+		if (!menu_is_open() && input_menu_combo())
+			menu_open();
+		if (menu_is_open()) {
+			if (!audio_waiting) {
+				audio_waiting = true;
+				SDL_PauseAudioDevice(audio, 1);
+			}
+			menu_update();
+			video_set_overlay(menu_draw(), MENU_WIDTH, MENU_HEIGHT);
+			video_present();
+			if (!synced)
+				SDL_Delay(16);
+			clock_start = SDL_GetPerformanceCounter() - frequency / (Uint64)(2 * rate);
+			frames_done = 0;
+			continue;
+		}
 		long due = capture_frame ? 1
 			: (long)((SDL_GetPerformanceCounter() - clock_start) * rate / frequency) - frames_done;
 		if (due > 3) {  /* fell far behind (window dragged, system busy): resync instead of rushing */
@@ -522,12 +621,16 @@ int main(int argc, char **argv)
 			frames_run_stats++;
 			update_audio_ratio();
 			if (capture_frame && ++frames_run == capture_frame) {
+				if (getenv("REMAKEIA_CAPTURE_MENU"))
+					menu_show(getenv("REMAKEIA_CAPTURE_MENU"));
 				video_capture_next(getenv("REMAKEIA_CAPTURE"));
 				running = false;
 			}
 		}
-		if (run_frame || synced)
+		if (run_frame || synced) {
+			video_set_overlay(menu_draw(), MENU_WIDTH, MENU_HEIGHT);
 			video_present();
+		}
 
 		if (show_stats && SDL_GetTicks() - stats_start >= 2000) {
 			Uint32 elapsed = SDL_GetTicks() - stats_start;

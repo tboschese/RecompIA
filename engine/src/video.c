@@ -57,13 +57,25 @@ static Profile profiles[] = {
 
 static SDL_Window *window;
 static int current;
-static GLuint source, intermediate, framebuffer, vao_screen, vao_offscreen;
+static GLuint source, intermediate, framebuffer, vao_screen, vao_offscreen, overlay, overlay_program;
+static bool overlay_on;
 static int source_w, source_h, source_format = -1, intermediate_w, intermediate_h;
 static unsigned frame_count;
 static int pixel_format = VIDEO_0RGB1555;
 static char capture_path[4096];
 
 static void write_capture(int w, int h);
+
+/* Menus and messages: an RGBA image blended over the game, scaled with it. */
+static const char overlay_shader[] =
+	"#ifdef GL_ES\nprecision mediump float;\n#endif\n"
+	"#ifdef VERTEX\n"
+	"in vec4 VertexCoord; in vec4 TexCoord; out vec2 uv;\n"
+	"void main() { gl_Position = VertexCoord; uv = TexCoord.xy; }\n"
+	"#else\n"
+	"in vec2 uv; out vec4 color; uniform sampler2D Texture;\n"
+	"void main() { color = texture(Texture, uv); }\n"
+	"#endif\n";
 
 static char *read_text(const char *path)
 {
@@ -98,6 +110,33 @@ static GLuint compile(GLenum type, const char *define, const char *body, const c
 	return shader;
 }
 
+static GLuint link(const char *body, const char *name)
+{
+	GLuint vs = compile(GL_VERTEX_SHADER, "#define VERTEX\n", body, name);
+	GLuint fs = compile(GL_FRAGMENT_SHADER, "#define FRAGMENT\n", body, name);
+	if (!vs || !fs)
+		return 0;
+
+	GLuint program = glCreateProgram();
+	glAttachShader(program, vs);
+	glAttachShader(program, fs);
+	glBindAttribLocation(program, 0, "VertexCoord");
+	glBindAttribLocation(program, 1, "TexCoord");
+	glLinkProgram(program);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	GLint ok;
+	glGetProgramiv(program, GL_LINK_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetProgramInfoLog(program, sizeof log, NULL, log);
+		fprintf(stderr, "shader %s: %s\n", name, log);
+		glDeleteProgram(program);
+		return 0;
+	}
+	return program;
+}
+
 static bool load_shader(Shader *s, const char *dir, const char *file)
 {
 	char path[4096];
@@ -107,28 +146,10 @@ static bool load_shader(Shader *s, const char *dir, const char *file)
 		fprintf(stderr, "shader não encontrado: %s\n", path);
 		return false;
 	}
-	GLuint vs = compile(GL_VERTEX_SHADER, "#define VERTEX\n", body, file);
-	GLuint fs = compile(GL_FRAGMENT_SHADER, "#define FRAGMENT\n", body, file);
+	s->program = link(body, file);
 	free(body);
-	if (!vs || !fs)
+	if (!s->program)
 		return false;
-
-	s->program = glCreateProgram();
-	glAttachShader(s->program, vs);
-	glAttachShader(s->program, fs);
-	glBindAttribLocation(s->program, 0, "VertexCoord");
-	glBindAttribLocation(s->program, 1, "TexCoord");
-	glLinkProgram(s->program);
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	GLint ok;
-	glGetProgramiv(s->program, GL_LINK_STATUS, &ok);
-	if (!ok) {
-		char log[2048];
-		glGetProgramInfoLog(s->program, sizeof log, NULL, log);
-		fprintf(stderr, "shader %s: %s\n", file, log);
-		return false;
-	}
 	s->mvp = glGetUniformLocation(s->program, "MVPMatrix");
 	s->output_size = glGetUniformLocation(s->program, "OutputSize");
 	s->texture_size = glGetUniformLocation(s->program, "TextureSize");
@@ -205,7 +226,9 @@ bool video_init(SDL_Window *w, const char *shader_dir, const char *profile)
 	vao_offscreen = make_quad(false);
 	source = make_texture();
 	intermediate = make_texture();
+	overlay = make_texture();
 	glGenFramebuffers(1, &framebuffer);
+	overlay_program = link(overlay_shader, "overlay");
 	return true;
 }
 
@@ -312,6 +335,17 @@ void video_present(void)
 			input = intermediate;
 		}
 	}
+	if (overlay_on && overlay_program) {
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glUseProgram(overlay_program);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, overlay);
+		glUniform1i(glGetUniformLocation(overlay_program, "Texture"), 0);
+		glBindVertexArray(vao_screen);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		glDisable(GL_BLEND);
+	}
 	if (capture_path[0]) {
 		write_capture(w, h);
 		capture_path[0] = 0;
@@ -337,6 +371,15 @@ static void write_capture(int w, int h)
 void video_capture_next(const char *path)
 {
 	snprintf(capture_path, sizeof capture_path, "%s", path);
+}
+
+void video_set_overlay(const uint32_t *rgba, int width, int height)
+{
+	overlay_on = rgba != NULL;
+	if (!overlay_on)
+		return;
+	glBindTexture(GL_TEXTURE_2D, overlay);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
 }
 
 bool video_set_vsync(bool on)
