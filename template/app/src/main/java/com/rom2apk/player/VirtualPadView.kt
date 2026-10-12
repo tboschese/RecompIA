@@ -82,6 +82,24 @@ class VirtualPadView(
             invalidate()
         }
 
+    /** Multiplier applied to every control size. */
+    var controlScale = 1f
+        set(value) {
+            field = value
+            releaseAll()
+            layoutControls(width, height)
+            invalidate()
+        }
+
+    /** Multiplier applied to every control alpha. */
+    var opacity = 1f
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var haptics = true
+
     private val leftDir = Directional(
         if (layout.left == LeftControl.STICK) GLRetroView.MOTION_SOURCE_ANALOG_LEFT else GLRetroView.MOTION_SOURCE_DPAD,
         if (layout.left == LeftControl.STICK) DirStyle.STICK else DirStyle.DPAD,
@@ -94,6 +112,18 @@ class VirtualPadView(
     private val selectButton = if (layout.hasSelect) Button("SELECT", KeyEvent.KEYCODE_BUTTON_SELECT, 0, false) else null
     private val startButton = if (layout.hasStart) Button("START", KeyEvent.KEYCODE_BUTTON_START, 0, false) else null
     private val buttons = faceButtons + shoulderButtons + listOfNotNull(selectButton, startButton)
+
+    /**
+     * Pairs of neighbouring face buttons. Touching the gap between them presses both, so
+     * combos like Y+B (run + jump) work with a single thumb.
+     */
+    private val facePairs = faceButtons.indices.flatMap { i ->
+        (i + 1 until faceButtons.size).map { j -> faceButtons[i] to faceButtons[j] }
+    }.filter { (a, b) ->
+        val specA = layout.face[faceButtons.indexOf(a)]
+        val specB = layout.face[faceButtons.indexOf(b)]
+        hypot(specA.dx - specB.dx, specA.dy - specB.dy) < 1.1f
+    }
 
     private val menuBounds = RectF()
 
@@ -120,10 +150,14 @@ class VirtualPadView(
         const val NEUTRAL = 0xFF1A1A1A.toInt()
     }
 
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        val unit = min(w, h).toFloat()
-        val margin = unit * 0.05f
-        val sideMargin = margin + unit * 0.04f
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) = layoutControls(w, h)
+
+    private fun layoutControls(w: Int, h: Int) {
+        if (w == 0 || h == 0) return
+        val base = min(w, h).toFloat()
+        val unit = base * controlScale
+        val margin = base * 0.05f
+        val sideMargin = margin + base * 0.04f
         val r = unit * 0.2f
         val clusterY = h - margin - r
 
@@ -162,10 +196,10 @@ class VirtualPadView(
         startButton?.bounds?.set(w / 2f + gap / 2, pillTop, w / 2f + gap / 2 + pillWidth, pillTop + pillHeight)
         if (selectButton == null) startButton?.bounds?.offset(-(pillWidth + gap) / 2, 0f)
 
-        val menuRadius = unit * 0.045f
+        val menuRadius = base * 0.045f
         menuBounds.set(w / 2f - menuRadius, margin, w / 2f + menuRadius, margin + 2 * menuRadius)
 
-        stroke.strokeWidth = unit * 0.006f
+        stroke.strokeWidth = base * 0.006f
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -177,7 +211,7 @@ class VirtualPadView(
                 val x = event.getX(index)
                 val y = event.getY(index)
                 if (menuBounds.contains(x, y)) {
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    if (haptics) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     listener.onMenu()
                     return true
                 }
@@ -207,11 +241,29 @@ class VirtualPadView(
             if (captured != null) {
                 newDirs[captured] = captured.vectorFor(x, y)
             } else {
-                buttons.firstOrNull { it.hit(x, y) }?.let { newKeys += it.keyCode }
+                newKeys += buttonsAt(x, y)
             }
         }
         applyState(newKeys, newDirs)
         return true
+    }
+
+    private fun buttonsAt(x: Float, y: Float): List<Int> {
+        for ((a, b) in facePairs) {
+            val midX = (a.bounds.centerX() + b.bounds.centerX()) / 2
+            val midY = (a.bounds.centerY() + b.bounds.centerY()) / 2
+            val buttonRadius = a.bounds.width() / 2
+            val halfDistance = hypot(a.bounds.centerX() - b.bounds.centerX(), a.bounds.centerY() - b.bounds.centerY()) / 2
+            // The zone must leave at least the inner 60% of each button for single presses.
+            val zone = min(buttonRadius * 0.5f, halfDistance - buttonRadius * 0.6f)
+            if (hypot(x - midX, y - midY) < zone) return listOf(a.keyCode, b.keyCode)
+        }
+        faceButtons
+            .map { it to hypot(x - it.bounds.centerX(), y - it.bounds.centerY()) }
+            .filter { (button, dist) -> dist < button.bounds.width() * 0.62f }
+            .minByOrNull { it.second }
+            ?.let { return listOf(it.first.keyCode) }
+        return (buttons - faceButtons.toSet()).filter { it.hit(x, y) }.take(1).map { it.keyCode }
     }
 
     private fun applyState(newKeys: Set<Int>, newDirs: Map<Directional, PointF>) {
@@ -219,13 +271,16 @@ class VirtualPadView(
         (pressedKeys - newKeys).forEach { listener.onKey(it, false); changed = true }
         val pressed = newKeys - pressedKeys
         pressed.forEach { listener.onKey(it, true); changed = true }
-        if (pressed.isNotEmpty()) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        if (pressed.isNotEmpty() && haptics) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         pressedKeys = newKeys
 
         for (dir in directionals) {
             val value = newDirs[dir] ?: PointF(0f, 0f)
             val old = dirValues[dir] ?: PointF(0f, 0f)
             if (value != old) {
+                if (haptics && dir.style != DirStyle.STICK && (value.x != 0f || value.y != 0f)) {
+                    performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                }
                 listener.onDirection(dir.source, value.x, value.y)
                 dirValues[dir] = value
                 changed = true
@@ -247,26 +302,28 @@ class VirtualPadView(
         buttons.forEach { drawButton(canvas, it, it.keyCode in pressedKeys) }
     }
 
+    private fun alpha(value: Int) = (value * opacity).toInt().coerceIn(0, 255)
+
     // Neutral controls use a dark fill with a light outline so they stay visible on both
     // dark and bright game screens.
     private fun idleFill(color: Int = Color.WHITE) = fill.apply {
         this.color = if (color == Color.WHITE) NEUTRAL else color
-        alpha = if (color == Color.WHITE) 120 else 150
+        alpha = alpha(if (color == Color.WHITE) 120 else 150)
     }
 
     private fun pressedFill(color: Int = Color.WHITE) = fill.apply {
         this.color = color
-        alpha = 200
+        alpha = alpha(200).coerceAtLeast(140)
     }
 
     private fun drawMenuButton(canvas: Canvas) {
         canvas.drawOval(menuBounds, idleFill())
-        stroke.alpha = 120
+        stroke.alpha = alpha(120)
         canvas.drawOval(menuBounds, stroke)
         val cx = menuBounds.centerX()
         val cy = menuBounds.centerY()
         val half = menuBounds.width() * 0.25f
-        stroke.alpha = 200
+        stroke.alpha = alpha(200)
         for (offset in listOf(-0.5f, 0f, 0.5f)) {
             canvas.drawLine(cx - half, cy + offset * half, cx + half, cy + offset * half, stroke)
         }
@@ -281,11 +338,11 @@ class VirtualPadView(
         } else {
             canvas.drawRoundRect(b, b.height() / 2, b.height() / 2, paint)
         }
-        stroke.alpha = if (pressed) 230 else 120
+        stroke.alpha = if (pressed) 230 else alpha(120)
         if (button.round) canvas.drawOval(b, stroke) else canvas.drawRoundRect(b, b.height() / 2, b.height() / 2, stroke)
 
         text.textSize = if (button.round) b.height() * 0.45f else b.height() * 0.42f
-        text.alpha = if (pressed) 255 else 200
+        text.alpha = if (pressed) 255 else alpha(200)
         canvas.drawText(button.label, b.centerX(), b.centerY() - (text.descent() + text.ascent()) / 2, text)
     }
 
@@ -294,14 +351,14 @@ class VirtualPadView(
         when (dir.style) {
             DirStyle.STICK -> {
                 canvas.drawCircle(dir.cx, dir.cy, dir.radius, idleFill())
-                stroke.alpha = 120
+                stroke.alpha = alpha(120)
                 canvas.drawCircle(dir.cx, dir.cy, dir.radius, stroke)
                 val knobPressed = value.x != 0f || value.y != 0f
                 canvas.drawCircle(
                     dir.cx + value.x * dir.radius * 0.6f,
                     dir.cy + value.y * dir.radius * 0.6f,
                     dir.radius * 0.42f,
-                    if (knobPressed) pressedFill() else idleFill().apply { alpha = 110 },
+                    if (knobPressed) pressedFill() else idleFill().apply { alpha = alpha(110) },
                 )
             }
             DirStyle.DPAD -> {
@@ -315,8 +372,9 @@ class VirtualPadView(
                     op(Path().apply { addRoundRect(vertical, corner, corner, Path.Direction.CW) }, Path.Op.UNION)
                 }
                 canvas.drawPath(cross, idleFill())
-                stroke.alpha = 120
+                stroke.alpha = alpha(120)
                 canvas.drawPath(cross, stroke)
+                drawArrows(canvas, dir, arm, thickness)
                 val pressedPaint = pressedFill()
                 if (value.x != 0f) {
                     val left = if (value.x < 0) dir.cx - arm else dir.cx + thickness
@@ -339,12 +397,32 @@ class VirtualPadView(
                     val by = dir.cy + dy * offset
                     canvas.drawCircle(bx, by, small, if (active) pressedFill(yellow) else idleFill(yellow))
                     text.textSize = small * 0.9f
-                    text.alpha = 220
+                    text.alpha = alpha(220)
                     canvas.drawText(arrow, bx, by - (text.descent() + text.ascent()) / 2, text)
                 }
                 text.textSize = small * 0.8f
                 canvas.drawText("C", dir.cx, dir.cy - (text.descent() + text.ascent()) / 2, text)
             }
+        }
+    }
+
+    private fun drawArrows(canvas: Canvas, dir: Directional, arm: Float, thickness: Float) {
+        val tip = arm * 0.82f
+        val size = thickness * 0.5f
+        fill.color = Color.WHITE
+        fill.alpha = alpha(150)
+        for ((dx, dy) in listOf(0f to -1f, 0f to 1f, -1f to 0f, 1f to 0f)) {
+            val tipX = dir.cx + dx * tip
+            val tipY = dir.cy + dy * tip
+            val baseX = tipX - dx * size
+            val baseY = tipY - dy * size
+            val arrow = Path().apply {
+                moveTo(tipX, tipY)
+                lineTo(baseX + dy * size, baseY + dx * size)
+                lineTo(baseX - dy * size, baseY - dx * size)
+                close()
+            }
+            canvas.drawPath(arrow, fill)
         }
     }
 }

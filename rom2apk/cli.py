@@ -29,6 +29,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--icon", type=Path, help="ícone PNG/WEBP/JPG (quadrado, 512x512 recomendado)")
     b.add_argument("--video", choices=enhance.VIDEO_PROFILES, default="hd",
                    help="perfil de imagem inicial (padrão: hd)")
+    b.add_argument("--mode7", choices=list(enhance.SNES_MODE7), default="4x",
+                   help="SNES: resolução do Mode 7 (F-Zero, Mario Kart, Pilotwings…). Padrão: 4x")
+    b.add_argument("--aspect", choices=list(enhance.SNES_ASPECTS), default="4:3",
+                   help="SNES: proporção da tela — 4:3 (como na TV) ou 8:7 (pixels quadrados). Padrão: 4:3")
     b.add_argument("--scale", type=int, choices=[1, 2, 3, 4],
                    help="resolução interna para PS1/N64 (PS1 até 2x, N64 até 4x)")
     b.add_argument("--bios", type=Path, action="append", default=[],
@@ -110,6 +114,8 @@ def _build(args: argparse.Namespace) -> int:
                 icon=args.icon.resolve() if args.icon else None,
                 video=args.video,
                 scale=args.scale,
+                mode7=args.mode7,
+                aspect=args.aspect,
                 bios=[p.resolve() for p in args.bios],
                 abis=args.abi or ["arm64-v8a"],
                 keystore=keystore,

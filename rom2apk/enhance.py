@@ -6,7 +6,13 @@ from typing import Dict, Optional
 
 from .consoles import Console
 
-VIDEO_PROFILES = ("hd", "sharp", "crt", "lcd", "original")
+VIDEO_PROFILES = ("hd", "smooth", "crt", "crt-arcade", "sharp", "lcd", "original")
+
+# CRT shaders draw one scanline per source line, so they need the console's native resolution.
+NATIVE_RESOLUTION_PROFILES = ("crt", "crt-arcade")
+
+SNES_MODE7 = {"off": "disabled", "2x": "2x_hv", "4x": "4x_hv"}
+SNES_ASPECTS = {"4:3": "4:3", "8:7": "uncorrected"}
 
 # Internal-resolution multipliers each 3D core can actually render at.
 MAX_SCALE = {"psx": 2, "n64": 4}
@@ -30,12 +36,24 @@ def initial_shader(console: Console, video: str) -> str:
     return video
 
 
-def core_variables(console: Console, video: str, scale: int) -> Dict[str, str]:
+def core_variables(
+    console: Console,
+    video: str,
+    scale: int,
+    mode7: str = "4x",
+    aspect: str = "4:3",
+) -> Dict[str, str]:
     enhanced = video != "original"
     variables: Dict[str, str] = {}
 
     if console.id == "nes" and enhanced:
         variables["fceumm_nospritelimit"] = "enabled"
+
+    elif console.id == "snes":
+        variables["snes9x_mode7_hires"] = SNES_MODE7[mode7] if enhanced else "disabled"
+        variables["snes9x_mode7_hires_bilinear"] = "stable"
+        variables["snes9x_aspect"] = SNES_ASPECTS[aspect]
+        variables["snes9x_reduce_sprite_flicker"] = "enabled" if enhanced else "disabled"
 
     elif console.id in ("md", "sms", "gg") and enhanced:
         variables["genesis_plus_gx_no_sprite_limit"] = "enabled"
@@ -55,3 +73,10 @@ def core_variables(console: Console, video: str, scale: int) -> Dict[str, str]:
         variables["mupen64plus-pak1"] = "memory"
 
     return variables
+
+
+def native_resolution_overrides(console: Console) -> Dict[str, str]:
+    """Core options the app applies while a CRT filter (see NATIVE_RESOLUTION_PROFILES) is active."""
+    if console.id == "snes":
+        return {"snes9x_mode7_hires": "disabled"}
+    return {}

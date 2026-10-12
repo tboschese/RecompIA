@@ -63,7 +63,7 @@ android {
 }
 
 dependencies {
-    implementation("com.github.swordfish90:libretrodroid:0.14.0")
+    implementation(project(":libretrodroid"))
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")

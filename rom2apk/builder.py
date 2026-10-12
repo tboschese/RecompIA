@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import enhance, roms, toolchain
+from . import enhance, libretrodroid, roms, toolchain
 from .cores import core_path
 from .paths import TEMPLATE_DIR, home
 
@@ -34,6 +34,8 @@ class BuildOptions:
     icon: Optional[Path] = None
     video: str = "hd"
     scale: Optional[int] = None
+    mode7: str = "4x"
+    aspect: str = "4:3"
     bios: List[Path] = field(default_factory=list)
     abis: List[str] = field(default_factory=lambda: ["arm64-v8a"])
     keystore: Optional[toolchain.Keystore] = None
@@ -60,14 +62,22 @@ def build(opts: BuildOptions) -> Path:
             raise BuildError(f"Nome de pacote inválido: {package}")
 
         scale = enhance.resolve_scale(console, opts.scale)
-        variables = enhance.core_variables(console, opts.video, scale)
+        variables = enhance.core_variables(console, opts.video, scale, opts.mode7, opts.aspect)
         cores = {abi: core_path(console, abi, opts.refresh_cores) for abi in opts.abis}
 
-        print(f"Console: {console.name} · núcleo {console.core} · vídeo {opts.video}"
-              + (f" · resolução {scale}x" if console.is_3d else ""), file=sys.stderr)
+        details = f"Console: {console.name} · núcleo {console.core} · vídeo {opts.video}"
+        if console.is_3d:
+            details += f" · resolução {scale}x"
+        if console.id == "snes":
+            details += f" · Mode 7 HD {opts.mode7} · proporção {opts.aspect}"
+        print(details, file=sys.stderr)
         print(f"Pacote: {package}", file=sys.stderr)
 
         workspace = _sync_workspace()
+        try:
+            libretrodroid.install(workspace)
+        except libretrodroid.LibretroDroidError as error:
+            raise BuildError(str(error)) from error
         main = workspace / "app" / "src" / "main"
 
         roms.copy_files(game, main / "assets" / "game")
@@ -88,6 +98,7 @@ def build(opts: BuildOptions) -> Path:
             "main": game.main,
             "shader": enhance.initial_shader(console, opts.video),
             "variables": variables,
+            "native_variables": enhance.native_resolution_overrides(console),
             "version": game.version,
         }, ensure_ascii=False, indent=2))
 

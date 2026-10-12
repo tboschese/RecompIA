@@ -13,6 +13,9 @@ from typing import List, Optional
 from .paths import home
 
 REQUIRED_PLATFORM = "android-35"
+# Defaults of Android Gradle Plugin 8.7 / LibretroDroid's CMake configuration.
+REQUIRED_NDK = "27.0.12077973"
+REQUIRED_CMAKE = "3.22.1"
 
 
 class ToolchainError(Exception):
@@ -82,6 +85,12 @@ def check(sdk: Path) -> List[str]:
         )
     if not any((sdk / "build-tools").glob("3[5-9]*")):
         problems.append("build-tools 35+ ausente. Instale com: sdkmanager 'build-tools;35.0.0'")
+    if not (sdk / "ndk" / REQUIRED_NDK).is_dir():
+        problems.append(f"NDK {REQUIRED_NDK} ausente. Instale com: sdkmanager 'ndk;{REQUIRED_NDK}'")
+    if not (sdk / "cmake" / REQUIRED_CMAKE).is_dir():
+        problems.append(f"CMake {REQUIRED_CMAKE} ausente. Instale com: sdkmanager 'cmake;{REQUIRED_CMAKE}'")
+    if not shutil.which("git"):
+        problems.append("git ausente. Instale com: xcode-select --install")
     return problems
 
 

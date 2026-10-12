@@ -23,6 +23,7 @@ import com.swordfish.libretrodroid.GLRetroViewData
 import com.swordfish.libretrodroid.LibretroDroid
 import com.swordfish.libretrodroid.Variable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,6 +36,19 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
 
     private enum class TouchMode(val label: String) { AUTO("Automático"), ALWAYS("Sempre"), NEVER("Nunca") }
 
+    private enum class PadSize(val label: String, val scale: Float) {
+        SMALL("Pequeno", 0.85f), MEDIUM("Médio", 1f), LARGE("Grande", 1.15f), HUGE("Enorme", 1.3f)
+    }
+
+    private enum class PadOpacity(val label: String, val factor: Float) {
+        LOW("Discreta", 0.55f), MEDIUM("Normal", 1f), HIGH("Forte", 1.5f)
+    }
+
+    private enum class ButtonMapping(val label: String) {
+        POSITION("Pela posição (Xbox, PlayStation, genéricos)"),
+        LABEL("Pelo nome (controles com layout Nintendo)"),
+    }
+
     private lateinit var config: GameConfig
     private lateinit var container: FrameLayout
     private var retroView: GLRetroView? = null
@@ -45,6 +59,7 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
     private val prefs by lazy { getSharedPreferences("player", Context.MODE_PRIVATE) }
     private val savesDir by lazy { File(filesDir, "saves").apply { mkdirs() } }
     private val sramFile get() = File(savesDir, "game.srm")
+    private val resumeFile get() = File(savesDir, "resume-${config.version}.state")
     private val inputManager by lazy { getSystemService(InputManager::class.java) }
     private val padLayout by lazy { PadLayouts.forConsole(config.console) }
 
@@ -53,8 +68,33 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
         set(value) = prefs.edit().putString("filter", value.id).apply()
 
     private var touchMode: TouchMode
-        get() = TouchMode.valueOf(prefs.getString("touch_mode", TouchMode.AUTO.name)!!)
+        get() = enumPref("touch_mode", TouchMode.AUTO)
         set(value) = prefs.edit().putString("touch_mode", value.name).apply()
+
+    private var padSize: PadSize
+        get() = enumPref("pad_size", PadSize.MEDIUM)
+        set(value) = prefs.edit().putString("pad_size", value.name).apply()
+
+    private var padOpacity: PadOpacity
+        get() = enumPref("pad_opacity", PadOpacity.MEDIUM)
+        set(value) = prefs.edit().putString("pad_opacity", value.name).apply()
+
+    private var buttonMapping: ButtonMapping
+        get() = enumPref("button_mapping", ButtonMapping.POSITION)
+        set(value) = prefs.edit().putString("button_mapping", value.name).apply()
+
+    private var haptics: Boolean
+        get() = prefs.getBoolean("haptics", true)
+        set(value) = prefs.edit().putBoolean("haptics", value).apply()
+
+    private var autoResume: Boolean
+        get() = prefs.getBoolean("auto_resume", true)
+        set(value) = prefs.edit().putBoolean("auto_resume", value).apply()
+
+    private var fastForward = false
+
+    private inline fun <reified T : Enum<T>> enumPref(key: String, default: T): T =
+        runCatching { enumValueOf<T>(prefs.getString(key, null) ?: default.name) }.getOrDefault(default)
 
     private val triggerState = HashMap<Int, Pair<Boolean, Boolean>>()
     private val pressTimes = HashMap<Int, Long>()
@@ -121,9 +161,9 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
             gameFilePath = gameFile.absolutePath
             systemDirectory = File(filesDir, "system").absolutePath
             savesDirectory = savesDir.absolutePath
-            variables = config.variables.map { Variable(it.key, it.value) }.toTypedArray()
+            variables = config.variablesFor(filter).map { Variable(it.key, it.value) }.toTypedArray()
             saveRAMState = sramFile.takeIf { it.exists() }?.readBytes()
-            shader = filter.shader
+            shader = filter.shader(this@GameActivity)
             rumbleEventsEnabled = false
             preferLowLatencyAudio = true
         }
@@ -138,6 +178,7 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
 
         val padView = VirtualPadView(this, padLayout, this)
         pad = padView
+        applyPadSettings()
         container.addView(padView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         updatePadVisibility()
 
@@ -147,8 +188,22 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
             }
         }
         lifecycleScope.launch {
+            view.getGLRetroEvents().first { it is GLRetroView.GLRetroEvents.FrameRendered }
+            resumeWhereLeftOff(view)
+        }
+        lifecycleScope.launch {
             view.getGLRetroErrors().collect { showFatalError(describeError(it)) }
         }
+    }
+
+    private suspend fun resumeWhereLeftOff(view: GLRetroView) {
+        savesDir.listFiles { file -> file.name.startsWith("resume-") && file != resumeFile }?.forEach { it.delete() }
+        val file = resumeFile
+        if (!autoResume || !file.exists()) return
+        val ok = withContext(Dispatchers.IO) {
+            runCatching { view.unserializeState(file.readBytes(), true) }.getOrDefault(false)
+        }
+        if (ok) toast("Continuando de onde você parou")
     }
 
     private fun describeError(code: Int): String = when (code) {
@@ -187,6 +242,7 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
         val view = retroView ?: return
         if (!gameLoaded) return
         runCatching { sramFile.writeBytes(view.serializeSRAM(false)) }
+        if (autoResume) runCatching { resumeFile.writeBytes(view.serializeState(false)) }
     }
 
     private fun enterImmersiveMode() {
@@ -283,7 +339,8 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
         }
         if (event.keyCode in GAMEPAD_KEYS && isGamepadEvent(event)) {
             if (event.repeatCount == 0) {
-                view.sendKeyEvent(event.action, toRetroPad(event.keyCode), portOf(event.device))
+                val keyCode = if (buttonMapping == ButtonMapping.POSITION) toRetroPad(event.keyCode) else event.keyCode
+                view.sendKeyEvent(event.action, keyCode, portOf(event.device))
             }
             return true
         }
@@ -352,7 +409,8 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
             "Salvar estado…" to { showSlotPicker(save = true) },
             "Carregar estado…" to { showSlotPicker(save = false) },
             "Filtro de imagem: ${filter.label}" to { showFilterPicker() },
-            "Controles na tela: ${touchMode.label}" to { showTouchModePicker() },
+            "Controles…" to { showControlsMenu() },
+            (if (fastForward) "Avançar rápido: ligado" else "Avançar rápido: desligado") to { toggleFastForward() },
             "Reiniciar jogo" to { retroView?.reset(false); Unit },
             "Sair" to { saveSram(); finish() },
         )
@@ -366,7 +424,7 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
     private fun closeMenu() {
         // Sub-dialogs reopen the menu flow; only resume when nothing else is showing.
         container.post {
-            if (menuOpen && !subDialogOpen) {
+            if (menuOpen && openSubDialogs == 0) {
                 menuOpen = false
                 enterImmersiveMode()
                 if (!isFinishing) resumeEmulation()
@@ -374,12 +432,12 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
         }
     }
 
-    private var subDialogOpen = false
+    private var openSubDialogs = 0
 
     private fun showSubDialog(builder: AlertDialog.Builder) {
-        subDialogOpen = true
+        openSubDialogs++
         builder.setOnDismissListener {
-            subDialogOpen = false
+            openSubDialogs--
             closeMenu()
         }.show()
     }
@@ -420,26 +478,85 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
     }
 
     private fun showFilterPicker() {
-        val filters = VideoFilter.entries
+        val filters = VideoFilter.availableFor(config.console)
         showSubDialog(
             AlertDialog.Builder(this)
                 .setTitle("Filtro de imagem")
                 .setSingleChoiceItems(filters.map { it.label }.toTypedArray(), filters.indexOf(filter)) { dialog, which ->
+                    val previous = filter
                     filter = filters[which]
-                    retroView?.shader = filter.shader
+                    retroView?.apply {
+                        shader = filter.shader(this@GameActivity)
+                        if (previous.nativeResolution != filter.nativeResolution) {
+                            val changed = config.variablesFor(filter).filterKeys { it in config.nativeVariables }
+                            updateVariables(*changed.map { Variable(it.key, it.value) }.toTypedArray())
+                        }
+                    }
                     dialog.dismiss()
                 },
         )
     }
 
-    private fun showTouchModePicker() {
-        val modes = TouchMode.entries
+    private fun toggleFastForward() {
+        fastForward = !fastForward
+        retroView?.frameSpeed = if (fastForward) FAST_FORWARD_SPEED else 1
+    }
+
+    private fun applyPadSettings() {
+        pad?.apply {
+            controlScale = padSize.scale
+            opacity = padOpacity.factor
+            haptics = this@GameActivity.haptics
+        }
+    }
+
+    private fun showControlsMenu() {
+        val options = listOf(
+            "Mostrar na tela: ${touchMode.label}" to {
+                showChoice("Controles na tela", TouchMode.entries, touchMode, { it.label }) {
+                    touchMode = it
+                    updatePadVisibility()
+                }
+            },
+            "Tamanho: ${padSize.label}" to {
+                showChoice("Tamanho dos controles", PadSize.entries, padSize, { it.label }) {
+                    padSize = it
+                    applyPadSettings()
+                }
+            },
+            "Visibilidade: ${padOpacity.label}" to {
+                showChoice("Visibilidade dos controles", PadOpacity.entries, padOpacity, { it.label }) {
+                    padOpacity = it
+                    applyPadSettings()
+                }
+            },
+            (if (haptics) "Vibração: ligada" else "Vibração: desligada") to {
+                haptics = !haptics
+                applyPadSettings()
+            },
+            "Controle físico: ${if (buttonMapping == ButtonMapping.POSITION) "pela posição" else "pelo nome"}" to {
+                showChoice("Mapear botões do controle físico", ButtonMapping.entries, buttonMapping, { it.label }) {
+                    buttonMapping = it
+                }
+            },
+            (if (autoResume) "Continuar de onde parou: sim" else "Continuar de onde parou: não") to {
+                autoResume = !autoResume
+                if (!autoResume) resumeFile.delete()
+            },
+        )
         showSubDialog(
             AlertDialog.Builder(this)
-                .setTitle("Controles na tela")
-                .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), modes.indexOf(touchMode)) { dialog, which ->
-                    touchMode = modes[which]
-                    updatePadVisibility()
+                .setTitle("Controles")
+                .setItems(options.map { it.first }.toTypedArray()) { _, which -> options[which].second() },
+        )
+    }
+
+    private fun <T> showChoice(title: String, values: List<T>, current: T, label: (T) -> String, onPick: (T) -> Unit) {
+        showSubDialog(
+            AlertDialog.Builder(this)
+                .setTitle(title)
+                .setSingleChoiceItems(values.map(label).toTypedArray(), values.indexOf(current)) { dialog, which ->
+                    onPick(values[which])
                     dialog.dismiss()
                 },
         )
@@ -452,6 +569,7 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
     companion object {
         private const val SLOTS = 3
         private const val MIN_PRESS_MS = 50L
+        private const val FAST_FORWARD_SPEED = 3
 
         private val GAMEPAD_KEYS = setOf(
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,

@@ -1,0 +1,400 @@
+diff --git a/libretrodroid/build.gradle b/libretrodroid/build.gradle
+index a64dea7..338c0ab 100644
+--- a/libretrodroid/build.gradle
++++ b/libretrodroid/build.gradle
+@@ -1,28 +1,25 @@
+ apply plugin: 'com.android.library'
+ apply plugin: 'kotlin-android'
+-apply plugin: 'maven-publish'
+ 
+-group='com.github.Swordfish90'
++def abis = (project.findProperty("rom2apk.abis") ?: "arm64-v8a").toString().split(",").collect { it.trim() }
+ 
+ android {
+     namespace = "com.swordfish.libretrodroid"
+-    compileSdkVersion 33
+-    buildToolsVersion "34.0.0"
+-
++    compileSdk 35
+ 
+     defaultConfig {
+         minSdkVersion 21
+-        targetSdkVersion 31
+-        versionCode 1
+-        versionName "1.0"
+-
+-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+         consumerProguardFiles 'consumer-rules.pro'
+ 
++        ndk {
++            abiFilters(*abis)
++        }
++
+         externalNativeBuild {
+             cmake {
+-                // Available arguments are inside ${SDK}/cmake/.../android.toolchain.cmake file
+                 arguments '-DANDROID_STL=c++_static'
++                // Upstream relies on <functional> being included transitively, which NDK 27's libc++ no longer does.
++                cppFlags '-include', 'functional'
+             }
+         }
+     }
+@@ -30,7 +27,6 @@ android {
+     buildTypes {
+         release {
+             minifyEnabled false
+-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+         }
+     }
+ 
+@@ -41,12 +37,6 @@ android {
+         }
+     }
+ 
+-    publishing {
+-        singleVariant('release') {
+-            withSourcesJar()
+-        }
+-    }
+-
+     compileOptions {
+         sourceCompatibility = JavaVersion.VERSION_17
+         targetCompatibility = JavaVersion.VERSION_17
+@@ -56,24 +46,6 @@ android {
+     }
+ }
+ 
+-publishing {
+-    publications {
+-        release(MavenPublication) {
+-            groupId = 'com.swordfish'
+-            artifactId = 'libretrodroid'
+-            afterEvaluate {
+-                from components.release
+-            }
+-        }
+-    }
+-}
+-
+ dependencies {
+-    implementation fileTree(dir: 'libs', include: ['*.jar'])
+-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.5.1'
+-
+-    testImplementation 'junit:junit:4.13.2'
+-    androidTestImplementation 'androidx.test.ext:junit:1.1.3'
+-    androidTestImplementation 'androidx.test.espresso:espresso-core:3.4.0'
++    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+ }
+diff --git a/libretrodroid/src/main/cpp/shadermanager.cpp b/libretrodroid/src/main/cpp/shadermanager.cpp
+index b853a6a..a35b8cf 100644
+--- a/libretrodroid/src/main/cpp/shadermanager.cpp
++++ b/libretrodroid/src/main/cpp/shadermanager.cpp
+@@ -1602,9 +1602,49 @@ ShaderManager::Chain ShaderManager::getShader(const ShaderManager::Config& confi
+             false
+         };
+     }
++
++    case Type::SHADER_CUSTOM: {
++        Chain chain = buildCustomChain(config.params);
++        if (chain.passes.empty()) {
++            return getShader({ Type::SHADER_DEFAULT, {} });
++        }
++        return chain;
++    }
+ }
+ }
+ 
++// Custom chains are described entirely by params:
++//   passes=N, linear_texture=0|1 and, for each pass i,
++//   pass<i>_vertex, pass<i>_fragment, pass<i>_linear=0|1, pass<i>_scale=<float>
++ShaderManager::Chain ShaderManager::buildCustomChain(
++    const std::unordered_map<std::string, std::string>& params
++) {
++    auto get = [&params](const std::string& key, const std::string& fallback) {
++        auto it = params.find(key);
++        return it != params.end() ? it->second : fallback;
++    };
++
++    Chain chain;
++    chain.linearTexture = get("linear_texture", "0") == "1";
++
++    int count = std::stoi(get("passes", "0"));
++    for (int i = 0; i < count; ++i) {
++        std::string prefix = "pass" + std::to_string(i) + "_";
++        std::string vertex = get(prefix + "vertex", "");
++        std::string fragment = get(prefix + "fragment", "");
++        if (vertex.empty() || fragment.empty()) {
++            return {};
++        }
++        chain.passes.push_back({
++            vertex,
++            fragment,
++            get(prefix + "linear", "0") == "1",
++            std::stof(get(prefix + "scale", "1.0"))
++        });
++    }
++    return chain;
++}
++
+ std::string ShaderManager::buildDefines(
+     std::unordered_map<std::string, std::string> baseParams,
+     std::unordered_map<std::string, std::string> customParams
+diff --git a/libretrodroid/src/main/cpp/shadermanager.h b/libretrodroid/src/main/cpp/shadermanager.h
+index 4407e8b..102a904 100644
+--- a/libretrodroid/src/main/cpp/shadermanager.h
++++ b/libretrodroid/src/main/cpp/shadermanager.h
+@@ -51,6 +51,7 @@ public:
+         SHADER_UPSCALE_CUT = 4,
+         SHADER_UPSCALE_CUT2 = 5,
+         SHADER_UPSCALE_CUT3 = 6,
++        SHADER_CUSTOM = 7,
+     };
+ 
+     struct Config {
+@@ -94,6 +95,8 @@ private:
+         std::unordered_map<std::string, std::string> customParams
+     );
+ 
++    static Chain buildCustomChain(const std::unordered_map<std::string, std::string>& params);
++
+ public:
+     static Chain getShader(const Config& config);
+ };
+diff --git a/libretrodroid/src/main/cpp/video.cpp b/libretrodroid/src/main/cpp/video.cpp
+index a75dbaf..2c26ee5 100644
+--- a/libretrodroid/src/main/cpp/video.cpp
++++ b/libretrodroid/src/main/cpp/video.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <GLES2/gl2.h>
+ #include <EGL/egl.h>
++#include <algorithm>
+ #include <cstdlib>
+ #include <string>
+ #include <cmath>
+@@ -110,11 +111,17 @@ void Video::updateProgram() {
+ 
+     shadersChain = {};
+ 
++    bool failed = false;
+     std::for_each(shaders.passes.begin(), shaders.passes.end(), [&](const auto& item){
++        if (failed) return;
+         auto shader = ShaderChainEntry { };
+ 
+         shader.gProgram = createProgram(item.vertex.data(), item.fragment.data());
+         if (!shader.gProgram) {
++            if (requestedShaderConfig.type == ShaderManager::Type::SHADER_CUSTOM) {
++                failed = true;
++                return;
++            }
+             LOGE("Could not create gl program.");
+             throw std::runtime_error("Cannot create gl program");
+         }
+@@ -131,9 +138,28 @@ void Video::updateProgram() {
+ 
+         shader.gScreenDensityHandle = glGetUniformLocation(shader.gProgram, "screenDensity");
+ 
++        shader.gMVPMatrixHandle = glGetUniformLocation(shader.gProgram, "MVPMatrix");
++        shader.gFrameCountHandle = glGetUniformLocation(shader.gProgram, "FrameCount");
++        shader.gFrameDirectionHandle = glGetUniformLocation(shader.gProgram, "FrameDirection");
++        shader.gOutputSizeHandle = glGetUniformLocation(shader.gProgram, "OutputSize");
++        shader.gInputSizeHandle = glGetUniformLocation(shader.gProgram, "InputSize");
++        shader.gRetroTextureSizeHandle = glGetUniformLocation(shader.gProgram, "TextureSize");
++        shader.gRetroTextureHandle = glGetUniformLocation(shader.gProgram, "Texture");
++        shader.gOrigTextureHandle = glGetUniformLocation(shader.gProgram, "OrigTexture");
++        shader.gOrigInputSizeHandle = glGetUniformLocation(shader.gProgram, "OrigInputSize");
++
+         shadersChain.push_back(shader);
+     });
+ 
++    if (failed) {
++        LOGE("Custom shader failed to compile, falling back to the default shader.");
++        for (auto& entry : shadersChain) glDeleteProgram(entry.gProgram);
++        requestedShaderConfig = ShaderManager::Config { ShaderManager::Type::SHADER_DEFAULT };
++        loadedShaderType = std::nullopt;
++        updateProgram();
++        return;
++    }
++
+     renderer->setShaders(shaders);
+ }
+ 
+@@ -187,7 +213,8 @@ void Video::renderFrame() {
+         glBindTexture(GL_TEXTURE_2D, renderer->getTexture());
+         glUniform1i(shader.gTextureHandle, 0);
+ 
+-        if (shader.gPreviousPassTextureHandle != -1 && passData.texture.has_value()) {
++        bool hasPreviousPass = passData.texture.has_value();
++        if (hasPreviousPass) {
+             glActiveTexture(GL_TEXTURE0 + 1);
+             glBindTexture(GL_TEXTURE_2D, passData.texture.value());
+             glUniform1i(shader.gPreviousPassTextureHandle, 1);
+@@ -197,12 +224,14 @@ void Video::renderFrame() {
+ 
+         glUniform1f(shader.gScreenDensityHandle, getScreenDensity());
+ 
++        setRetroArchUniforms(shader, i, isLastPass, hasPreviousPass);
++
+         glDrawArrays(GL_TRIANGLES, 0, 6);
+ 
+         glDisableVertexAttribArray(shader.gvPositionHandle);
+         glDisableVertexAttribArray(shader.gvCoordinateHandle);
+ 
+-        if (shader.gPreviousPassTextureHandle != -1 && passData.texture.has_value()) {
++        if (hasPreviousPass) {
+             glActiveTexture(GL_TEXTURE0 + 1);
+             glBindTexture(GL_TEXTURE_2D, 0);
+         }
+@@ -211,6 +240,49 @@ void Video::renderFrame() {
+ 
+         glUseProgram(0);
+     }
++
++    frameCount++;
++}
++
++// In RetroArch shaders, "Texture" is the output of the previous pass (or the game frame for the
++// first pass), "InputSize"/"TextureSize" describe that input and "OutputSize" the pass target.
++void Video::setRetroArchUniforms(const ShaderChainEntry& shader, int pass, bool isLastPass, bool hasPreviousPass) {
++    static const GLfloat identity[16] = {
++        1.0F, 0.0F, 0.0F, 0.0F,
++        0.0F, 1.0F, 0.0F, 0.0F,
++        0.0F, 0.0F, 1.0F, 0.0F,
++        0.0F, 0.0F, 0.0F, 1.0F,
++    };
++
++    float inputWidth = getTextureWidth();
++    float inputHeight = getTextureHeight();
++    if (pass > 0) {
++        auto previous = renderer->getPassData(pass - 1);
++        inputWidth = (float) previous.width.value_or((unsigned) inputWidth);
++        inputHeight = (float) previous.height.value_or((unsigned) inputHeight);
++    }
++
++    float outputWidth;
++    float outputHeight;
++    if (isLastPass) {
++        auto& bounds = videoLayout.getRelativeForegroundBounds();
++        outputWidth = std::max(1.0F, (bounds[2] - bounds[0]) * videoLayout.getScreenWidth());
++        outputHeight = std::max(1.0F, (bounds[3] - bounds[1]) * videoLayout.getScreenHeight());
++    } else {
++        auto current = renderer->getPassData(pass);
++        outputWidth = (float) current.width.value_or(1);
++        outputHeight = (float) current.height.value_or(1);
++    }
++
++    if (shader.gMVPMatrixHandle != -1) glUniformMatrix4fv(shader.gMVPMatrixHandle, 1, GL_FALSE, identity);
++    if (shader.gFrameCountHandle != -1) glUniform1i(shader.gFrameCountHandle, (GLint) frameCount);
++    if (shader.gFrameDirectionHandle != -1) glUniform1i(shader.gFrameDirectionHandle, 1);
++    if (shader.gOutputSizeHandle != -1) glUniform2f(shader.gOutputSizeHandle, outputWidth, outputHeight);
++    if (shader.gInputSizeHandle != -1) glUniform2f(shader.gInputSizeHandle, inputWidth, inputHeight);
++    if (shader.gRetroTextureSizeHandle != -1) glUniform2f(shader.gRetroTextureSizeHandle, inputWidth, inputHeight);
++    if (shader.gOrigInputSizeHandle != -1) glUniform2f(shader.gOrigInputSizeHandle, getTextureWidth(), getTextureHeight());
++    if (shader.gOrigTextureHandle != -1) glUniform1i(shader.gOrigTextureHandle, 0);
++    if (shader.gRetroTextureHandle != -1) glUniform1i(shader.gRetroTextureHandle, hasPreviousPass ? 1 : 0);
+ }
+ 
+ float Video::getScreenDensity() {
+diff --git a/libretrodroid/src/main/cpp/video.h b/libretrodroid/src/main/cpp/video.h
+index 05bd6b6..c1a3946 100644
+--- a/libretrodroid/src/main/cpp/video.h
++++ b/libretrodroid/src/main/cpp/video.h
+@@ -51,6 +51,17 @@ public:
+         GLint gPreviousPassTextureHandle = 0;
+         GLint gScreenDensityHandle = 0;
+         GLint gTextureSizeHandle = 0;
++
++        // RetroArch GLSL shader conventions, used by custom shader chains.
++        GLint gMVPMatrixHandle = -1;
++        GLint gFrameCountHandle = -1;
++        GLint gFrameDirectionHandle = -1;
++        GLint gOutputSizeHandle = -1;
++        GLint gInputSizeHandle = -1;
++        GLint gRetroTextureSizeHandle = -1;
++        GLint gRetroTextureHandle = -1;
++        GLint gOrigTextureHandle = -1;
++        GLint gOrigInputSizeHandle = -1;
+     };
+ 
+     Video(
+@@ -89,6 +100,7 @@ public:
+ 
+ private:
+     void updateProgram();
++    void setRetroArchUniforms(const ShaderChainEntry& shader, int pass, bool isLastPass, bool hasPreviousPass);
+ 
+     float getScreenDensity();
+     float getTextureWidth();
+@@ -106,6 +118,7 @@ private:
+     bool skipDuplicateFrames = false;
+ 
+     std::vector<ShaderChainEntry> shadersChain;
++    unsigned int frameCount = 0;
+ 
+     bool immersiveModeEnabled = false;
+     ImmersiveMode immersiveMode;
+diff --git a/libretrodroid/src/main/java/com/swordfish/libretrodroid/GLRetroView.kt b/libretrodroid/src/main/java/com/swordfish/libretrodroid/GLRetroView.kt
+index 7eb8602..203422a 100644
+--- a/libretrodroid/src/main/java/com/swordfish/libretrodroid/GLRetroView.kt
++++ b/libretrodroid/src/main/java/com/swordfish/libretrodroid/GLRetroView.kt
+@@ -460,6 +460,20 @@ class GLRetroView(
+                     LibretroDroid.SHADER_UPSCALE_CUT3_PARAM_HARD_EDGES_SEARCH_MAX_DISTANCE to toParam(config.hardEdgesSearchMaxDistance),
+                 )
+             )
++
++            is ShaderConfig.Custom -> {
++                val params = mutableMapOf(
++                    "passes" to config.passes.size.toString(),
++                    "linear_texture" to toParam(config.linearTexture),
++                )
++                config.passes.forEachIndexed { index, pass ->
++                    params["pass${index}_vertex"] = pass.vertex
++                    params["pass${index}_fragment"] = pass.fragment
++                    params["pass${index}_linear"] = toParam(pass.linear)
++                    params["pass${index}_scale"] = toParam(pass.scale)
++                }
++                GLRetroShader(LibretroDroid.SHADER_CUSTOM, params)
++            }
+         }
+     }
+ 
+diff --git a/libretrodroid/src/main/java/com/swordfish/libretrodroid/LibretroDroid.java b/libretrodroid/src/main/java/com/swordfish/libretrodroid/LibretroDroid.java
+index 50eafa1..d03de46 100644
+--- a/libretrodroid/src/main/java/com/swordfish/libretrodroid/LibretroDroid.java
++++ b/libretrodroid/src/main/java/com/swordfish/libretrodroid/LibretroDroid.java
+@@ -37,6 +37,7 @@ public class LibretroDroid {
+     public static final int SHADER_UPSCALE_CUT = 4;
+     public static final int SHADER_UPSCALE_CUT2 = 5;
+     public static final int SHADER_UPSCALE_CUT3 = 6;
++    public static final int SHADER_CUSTOM = 7;
+ 
+     public static final String SHADER_UPSCALE_CUT_PARAM_USE_DYNAMIC_BLEND = "USE_DYNAMIC_BLEND";
+     public static final String SHADER_UPSCALE_CUT_PARAM_BLEND_MIN_CONTRAST_EDGE = "BLEND_MIN_CONTRAST_EDGE";
+diff --git a/libretrodroid/src/main/java/com/swordfish/libretrodroid/ShaderConfig.kt b/libretrodroid/src/main/java/com/swordfish/libretrodroid/ShaderConfig.kt
+index 5bf4514..adc5d7b 100644
+--- a/libretrodroid/src/main/java/com/swordfish/libretrodroid/ShaderConfig.kt
++++ b/libretrodroid/src/main/java/com/swordfish/libretrodroid/ShaderConfig.kt
+@@ -62,4 +62,22 @@ sealed interface ShaderConfig {
+         val hardEdgesSearchMaxError: Float = 0.25f,
+         val hardEdgesSearchMaxDistance: Int = 4,
+     ) : ShaderConfig
++
++    /**
++     * Arbitrary GLSL chain. Shaders can use either LibretroDroid's uniforms (texture,
++     * previousPass, textureSize, screenDensity) or RetroArch's (Texture, OrigTexture,
++     * InputSize, TextureSize, OutputSize, FrameCount, MVPMatrix). If any pass fails to
++     * compile, the default shader is used instead.
++     */
++    data class Custom(
++        val passes: List<Pass>,
++        val linearTexture: Boolean = false,
++    ) : ShaderConfig {
++        data class Pass(
++            val vertex: String,
++            val fragment: String,
++            val linear: Boolean = false,
++            val scale: Float = 1.0f,
++        )
++    }
+ }
