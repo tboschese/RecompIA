@@ -4,14 +4,21 @@
  "app": {
   "title": "Chrono Trigger",
   "id": "chrono-trigger",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon_seconds": 30,
+  "core": "bsnes-hd",
+  "video": "pixel",
   "options": {
-   "snes9x_aspect": "4:3",
-   "snes9x_overscan": "enabled",
-   "snes9x_mode7_hires": "4x_hv",
-   "snes9x_mode7_hires_bilinear": "stable",
-   "snes9x_reduce_sprite_flicker": "enabled"
+   "bsnes_ppu_show_overscan": "ON",
+   "bsnes_video_aspectcorrection": "OFF",
+   "bsnes_ppu_no_sprite_limit": "ON",
+   "bsnes_mode7_scale": "4x",
+   "bsnes_mode7_perspective": "auto (wide)",
+   "bsnes_mode7_supersample": "none",
+   "bsnes_mode7_mosaic": "1x scale",
+   "bsnes_mode7_wsMode": "Mode 7",
+   "bsnes_mode7_widescreen": "16:9",
+   "bsnes_mode7_wsobj": "safe"
   }
  },
  "entries": [],

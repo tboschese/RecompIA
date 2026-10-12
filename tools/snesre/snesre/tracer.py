@@ -18,7 +18,8 @@ from typing import Optional
 SNES9X_REPO = "https://github.com/libretro/snes9x.git"
 SNES9X_COMMIT = "fae2fea08f74180759ef540ee94259213f503480"
 SOURCES = Path(__file__).resolve().parent.parent / "tracer"
-ENGINE = Path(__file__).resolve().parents[3] / "engine" / "src" / "main.c"
+ENGINE = Path(__file__).resolve().parents[3] / "engine"
+ENGINE_SOURCES = ("src/main.c", "src/video.c", "src/video.h")
 CORE_FILES = ("snesre_trace.cpp", "snesre_trace.h")
 
 
@@ -66,15 +67,20 @@ def core_path() -> Path:
 
 
 def engine_path() -> Path:
-    target = home() / "bin" / f"engine-{_digest(ENGINE)}"
+    sources = [ENGINE / name for name in ENGINE_SOURCES]
+    target = home() / "bin" / f"engine-{_digest(*sources)}"
     if target.exists():
         return target
     if not shutil.which("sdl2-config"):
         raise RuntimeError("SDL2 não encontrado. No macOS: brew install sdl2")
     print("Compilando o motor…", file=sys.stderr)
     flags = subprocess.run(["sdl2-config", "--cflags", "--libs"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
+    if platform.system() == "Darwin":
+        flags += ["-framework", "OpenGL"]
+    else:
+        flags += ["-lGL"]
     target.parent.mkdir(parents=True, exist_ok=True)
-    _run(["cc", "-O2", "-std=c11", "-Wall", "-o", str(target), str(ENGINE), *flags])
+    _run(["cc", "-O2", "-std=c11", "-Wall", "-o", str(target), *(str(p) for p in sources if p.suffix == ".c"), *flags])
     return target
 
 
@@ -83,7 +89,7 @@ def play(rom: Path, trace: Path, saves: Path, frames: Optional[int] = None) -> i
     core, player = core_path(), engine_path()
     saves.mkdir(parents=True, exist_ok=True)
     trace.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, SNESRE_TRACE=str(trace.resolve()))
+    env = dict(os.environ, SNESRE_TRACE=str(trace.resolve()), REMAKEIA_SHADERS=str(ENGINE / "shaders"))
     cmd = [str(player), str(core), str(rom.resolve()), str(saves.resolve())]
     if frames:
         cmd.append(str(frames))

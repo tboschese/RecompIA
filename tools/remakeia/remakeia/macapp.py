@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import TOOLS  # noqa: F401  (puts snesre and rom2apk on the path)
+from . import TOOLS, cores
 from snesre import rom as rom_module, tracer
 
 ICON_STYLE = 1  # bump when icon.py changes so cached icons are regenerated
@@ -31,7 +31,7 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
     if game.get("sha1") and rom.sha1 != game["sha1"]:
         raise RuntimeError(f"esta ROM não é a versão esperada ({game['name']}): SHA-1 {rom.sha1}")
 
-    core, engine = tracer.core_path(), tracer.engine_path()
+    core, engine = cores.core_path(app.get("core", "snes9x")), tracer.engine_path()
     bundle = dist / f"{app['title']}.app"
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -44,10 +44,12 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
     shutil.copy(engine, executable)
     shutil.copy(core, resources / "core.dylib")
     (resources / "game.sfc").write_bytes(rom.data)
-    config = [f"title={app['title']}"] + [f"{key}={value}" for key, value in app.get("options", {}).items()]
+    shutil.copytree(tracer.ENGINE / "shaders", resources / "shaders")
+    config = [f"title={app['title']}", f"video={app.get('video', 'pixel')}"]
+    config += [f"{key}={value}" for key, value in app.get("options", {}).items()]
     (resources / "game.cfg").write_text("\n".join(config) + "\n")
     _bundle_sdl(executable, frameworks)
-    _icon(core, rom_path, rom.sha1, float(app.get("icon_seconds", 0)), resources / "AppIcon.icns")
+    _icon(tracer.core_path(), rom_path, rom.sha1, float(app.get("icon_seconds", 0)), resources / "AppIcon.icns")
 
     with (contents / "Info.plist").open("wb") as f:
         plistlib.dump({

@@ -7,14 +7,15 @@
  *   engine                              inside an .app: Resources/{core.dylib, game.sfc, game.cfg}
  *   engine CORE ROM DATA_DIR [FRAMES]   development; with FRAMES, runs headless (records the intro)
  *
- * game.cfg has `key=value` lines: `title` names the window and the save folder, every other key is
- * passed to the core as an option (e.g. snes9x_mode7_hires=4x_hv).
+ * game.cfg has `key=value` lines: `title` names the window and the save folder, `video` picks the
+ * look (pixel, crt; see video.c), every other key is passed to the core as an option
+ * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMAKEIA_SHADERS.
  *
  * Saves (cartridge battery, resume point, quick state) and the execution trace live in DATA_DIR, by
  * default ~/Library/Application Support/RemakeIA/<title>/.
  *
  * Keys: arrows, Z=B X=A A=Y S=X Q=L W=R, Enter=Start, Right Shift=Select, Tab (hold)=fast forward,
- * F5=quick save, F7=quick load, F11 or Cmd+F=fullscreen. Gamepads use the SNES layout.
+ * F2=next look, F5=quick save, F7=quick load, F11 or Cmd+F=fullscreen. Gamepads use the SNES layout.
  */
 
 #include <SDL.h>
@@ -25,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "video.h"
+
 #define ENV_GET_CAN_DUPE 3
 #define ENV_GET_SYSTEM_DIRECTORY 9
 #define ENV_SET_PIXEL_FORMAT 10
@@ -34,9 +37,6 @@
 #define ENV_EXPERIMENTAL 0x10000
 #define DEVICE_JOYPAD 1
 #define MEMORY_SAVE_RAM 0
-#define PIXEL_0RGB1555 0
-#define PIXEL_XRGB8888 1
-#define PIXEL_RGB565 2
 #define MAX_OPTIONS 64
 #define PATH 4096
 
@@ -74,15 +74,13 @@ static struct {
 } core;
 
 static char title[256] = "RemakeIA";
+static char look[32] = "pixel";
 static char *option_keys[MAX_OPTIONS], *option_values[MAX_OPTIONS];
 static int options;
 static char data_dir[PATH];
-static int pixel_format = PIXEL_0RGB1555;
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *frame, *upscaled;
-static int frame_w, frame_h, frame_format, upscaled_w, upscaled_h;
+static bool video_ready;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
 static SDL_GameController *pad;
@@ -100,7 +98,7 @@ static bool environment(unsigned cmd, void *data)
 		*(const char **)data = data_dir;
 		return true;
 	case ENV_SET_PIXEL_FORMAT:
-		pixel_format = *(const int *)data;
+		video_set_format(*(const int *)data);
 		return true;
 	case ENV_GET_VARIABLE: {
 		struct variable *var = data;
@@ -119,47 +117,10 @@ static bool environment(unsigned cmd, void *data)
 	}
 }
 
-/* Integer nearest-neighbour upscale, then a linear fit to the window: sharp pixels, no shimmer. */
 static void video(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-	if (!data || !renderer)
-		return;
-	int format = pixel_format == PIXEL_XRGB8888 ? SDL_PIXELFORMAT_ARGB8888
-		: pixel_format == PIXEL_RGB565 ? SDL_PIXELFORMAT_RGB565 : SDL_PIXELFORMAT_ARGB1555;
-	if (!frame || frame_w != (int)width || frame_h != (int)height || frame_format != format) {
-		if (frame)
-			SDL_DestroyTexture(frame);
-		frame = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING, width, height);
-		SDL_SetTextureScaleMode(frame, SDL_ScaleModeNearest);
-		frame_w = width, frame_h = height, frame_format = format;
-	}
-	SDL_UpdateTexture(frame, NULL, data, (int)pitch);
-
-	int w, h;
-	SDL_GetRendererOutputSize(renderer, &w, &h);
-	SDL_Rect dst = { 0, 0, w, h };
-	if (w > h * aspect)
-		dst.w = (int)(h * aspect), dst.x = (w - dst.w) / 2;
-	else
-		dst.h = (int)(w / aspect), dst.y = (h - dst.h) / 2;
-
-	int scale_x = (dst.w + width - 1) / width, scale_y = (dst.h + height - 1) / height;
-	int up_w = width * (scale_x > 1 ? scale_x : 1), up_h = height * (scale_y > 1 ? scale_y : 1);
-	if (!upscaled || upscaled_w != up_w || upscaled_h != up_h) {
-		if (upscaled)
-			SDL_DestroyTexture(upscaled);
-		upscaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, up_w, up_h);
-		SDL_SetTextureScaleMode(upscaled, SDL_ScaleModeLinear);
-		upscaled_w = up_w, upscaled_h = up_h;
-	}
-	SDL_SetRenderTarget(renderer, upscaled);
-	SDL_RenderCopy(renderer, frame, NULL, NULL);
-	SDL_SetRenderTarget(renderer, NULL);
-
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, upscaled, NULL, &dst);
-	SDL_RenderPresent(renderer);
+	if (data && video_ready)
+		video_frame(data, width, height, pitch);
 }
 
 static size_t audio_batch(const int16_t *data, size_t frames)
@@ -282,10 +243,19 @@ static void read_config(const char *path)
 		*eq = 0;
 		if (!strcmp(line, "title"))
 			snprintf(title, sizeof title, "%s", eq + 1);
+		else if (!strcmp(line, "video"))
+			snprintf(look, sizeof look, "%s", eq + 1);
 		else if (options < MAX_OPTIONS)
 			option_keys[options] = strdup(line), option_values[options++] = strdup(eq + 1);
 	}
 	free(text);
+}
+
+static void update_title(void)
+{
+	char text[512];
+	snprintf(text, sizeof text, "%s — %s", title, video_profile_name());
+	SDL_SetWindowTitle(window, text);
 }
 
 static void fail(const char *message)
@@ -300,7 +270,7 @@ static void fail(const char *message)
 
 int main(int argc, char **argv)
 {
-	char core_path[PATH], rom_path[PATH];
+	char core_path[PATH], rom_path[PATH], shader_dir[PATH] = "";
 	long headless_frames = 0;
 
 	if (argc == 1) {
@@ -311,6 +281,7 @@ int main(int argc, char **argv)
 		snprintf(config, sizeof config, "%sgame.cfg", base);
 		snprintf(core_path, sizeof core_path, "%score.dylib", base);
 		snprintf(rom_path, sizeof rom_path, "%sgame.sfc", base);
+		snprintf(shader_dir, sizeof shader_dir, "%sshaders", base);
 		read_config(config);
 		SDL_free(base);
 		char *pref = SDL_GetPrefPath("RemakeIA", title);
@@ -335,6 +306,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "uso: %s [NÚCLEO ROM PASTA_DE_DADOS [QUADROS]]\n", argv[0]);
 		return 2;
 	}
+	if (argc != 1 && getenv("REMAKEIA_CONFIG"))
+		read_config(getenv("REMAKEIA_CONFIG"));
+	if (getenv("REMAKEIA_VIDEO"))
+		snprintf(look, sizeof look, "%s", getenv("REMAKEIA_VIDEO"));
+	if (getenv("REMAKEIA_SHADERS"))
+		snprintf(shader_dir, sizeof shader_dir, "%s", getenv("REMAKEIA_SHADERS"));
 
 	void *lib = dlopen(core_path, RTLD_NOW);
 	if (!lib)
@@ -380,8 +357,8 @@ int main(int argc, char **argv)
 
 	struct av_info av = { 0 };
 	core.get_system_av_info(&av);
-	if (av.aspect > 0)
-		aspect = av.aspect;
+	if (av.base_width && av.base_height)
+		aspect = (float)av.base_width / av.base_height;  /* square pixels */
 	double fps = av.fps > 0 ? av.fps : 60.0;
 
 	if (headless_frames) {
@@ -399,11 +376,19 @@ int main(int argc, char **argv)
 	if (argc == 1)
 		load_state(resume_path);
 
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-		(int)(224 * 3 * aspect), 224 * 3, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
-	if (!window || !renderer)
+		(int)(224 * 3 * aspect), 224 * 3, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_OPENGL);
+	if (!window)
 		fail(SDL_GetError());
+	video_ready = video_init(window, shader_dir[0] ? shader_dir : NULL, look);
+	if (!video_ready)
+		fail("não consegui iniciar o vídeo (OpenGL e shaders)");
+	update_title();
 
 	SDL_AudioSpec want = { 0 }, have;
 	want.freq = av.sample_rate > 0 ? (int)av.sample_rate : 32040;
@@ -417,6 +402,9 @@ int main(int argc, char **argv)
 	Uint64 frequency = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter();
 	Uint32 last_save = SDL_GetTicks();
 	bool running = true, paused = false;
+	/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits. */
+	long capture_frame = getenv("REMAKEIA_CAPTURE") && getenv("REMAKEIA_CAPTURE_FRAME") ? atol(getenv("REMAKEIA_CAPTURE_FRAME")) : 0;
+	long frames_run = 0;
 	while (running) {
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
@@ -424,13 +412,16 @@ int main(int argc, char **argv)
 				running = false;
 			else if (event.type == SDL_CONTROLLERDEVICEADDED && !pad)
 				pad = SDL_GameControllerOpen(event.cdevice.which);
-			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !capture_frame)
 				paused = true, SDL_PauseAudioDevice(audio, 1);
 			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
 				paused = false, SDL_PauseAudioDevice(audio, 0), next = SDL_GetPerformanceCounter();
 			else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
 				SDL_Keycode sym = event.key.keysym.sym;
-				if (sym == SDLK_F5)
+				if (sym == SDLK_F2) {
+					video_next_profile();
+					update_title();
+				} else if (sym == SDLK_F5)
 					save_state(quick_path);
 				else if (sym == SDLK_F7)
 					load_state(quick_path);
@@ -446,7 +437,11 @@ int main(int argc, char **argv)
 			continue;
 		}
 		read_input();
+		if (capture_frame && ++frames_run == capture_frame)
+			video_capture_next(getenv("REMAKEIA_CAPTURE"));
 		core.run();
+		if (capture_frame && frames_run == capture_frame)
+			running = false;
 
 		if (SDL_GetTicks() - last_save > 30000) {
 			save_battery(battery_path);
@@ -455,7 +450,7 @@ int main(int argc, char **argv)
 			last_save = SDL_GetTicks();
 		}
 
-		if (fast_forward) {
+		if (fast_forward || capture_frame) {
 			next = SDL_GetPerformanceCounter();
 			continue;
 		}
