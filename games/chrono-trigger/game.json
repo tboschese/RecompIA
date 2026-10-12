@@ -4,7 +4,7 @@
  "app": {
   "title": "Chrono Trigger",
   "id": "chrono-trigger",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "icon_seconds": 30,
   "core": "bsnes-hd",
   "video": "pixel",

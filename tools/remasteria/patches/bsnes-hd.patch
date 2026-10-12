@@ -1,0 +1,233 @@
+diff --git a/bsnes/sfc/ppu-fast/line.cpp b/bsnes/sfc/ppu-fast/line.cpp
+index 551430c..ad5575c 100644
+--- a/bsnes/sfc/ppu-fast/line.cpp
++++ b/bsnes/sfc/ppu-fast/line.cpp
+@@ -72,6 +72,11 @@ auto PPU::Line::flush() -> void {
+   }
+ 
+   if(Line::count) {
++    for(uint n : range(128)) {
++      auto& o = ppu.objects[n];
++      remasteriaMotion.objects[n] = {o.x, o.y, o.character,
++        uint8_t(o.nameselect | o.palette << 1 | o.priority << 4 | o.hflip << 6 | o.vflip << 7), o.size};
++    }
+     if(ppu.hdScale() > 1) cacheMode7HD();
+     #pragma omp parallel for if(Line::count >= 8)
+     for(uint y = 0; y < Line::count; y++) {
+@@ -181,10 +186,19 @@ auto PPU::Line::render(bool fieldID) -> void {
+   ? (!ppu.hires() ? 256 : 512)
+   : ((256+2*ppu.widescreen()) * scale * scale));
+ 
++  if(y < 240) remasteriaMotion.mode[y] = io.displayDisable ? 0xff : io.bgMode;
+   if(io.displayDisable) {
++    if(y < 240) memset(remasteriaMotion.source[y], Source::COL, 256);
+     memory::fill<uint32>(output, width);
+     return;
+   }
++  if(y < 240) {
++    PPU::IO::Background* bgs[4] = {&io.bg1, &io.bg2, &io.bg3, &io.bg4};
++    for(uint n : range(4)) {
++      remasteriaMotion.hoffset[y][n] = bgs[n]->hoffset;
++      remasteriaMotion.voffset[y][n] = bgs[n]->voffset;
++    }
++  }
+ 
+   bool hires = io.pseudoHires || io.bgMode == 5 || io.bgMode == 6;
+   
+@@ -359,6 +373,12 @@ auto PPU::Line::render(bool fieldID) -> void {
+     }
+   } else if(width == 256) for(uint x : range(256)) {
+     *output++ = pixel(x, above[x], below[x], 0, 0, 0, bgFixedColors[0]);
++    if(y + (!ppu.latch.overscan ? 7 : 0) < 240) {
++      uint row = y + (!ppu.latch.overscan ? 7 : 0);
++      remasteriaMotion.source[row][x] = above[x].source;
++      remasteriaMotion.priority[row][x] = above[x].priority;
++      remasteriaMotion.object[row][x] = above[x].object;
++    }
+   } else if(!hires) for(uint x : range(256)) {
+     auto color = pixel(x, above[x], below[x], 0, 0, 0, bgFixedColors[0]);
+     *output++ = color;
+@@ -432,12 +452,12 @@ auto PPU::Line::directColor(uint paletteIndex, uint paletteColor) const -> uint3
+ 
+ auto PPU::Line::plotAbove(int x, uint8 source, uint8 priority, uint32 color) -> void {
+   if(ppu.hd() || ppu.ss()) return plotHD(above, x, source, priority, color, false, false);
+-  if(priority > above[x].priority) above[x] = {source, priority, color};
++  if(priority > above[x].priority) above[x] = {source, priority, color, plotObject};
+ }
+ 
+ auto PPU::Line::plotBelow(int x, uint8 source, uint8 priority, uint32 color) -> void {
+   if(ppu.hd() || ppu.ss()) return plotHD(below, x, source, priority, color, false, false);
+-  if(priority > below[x].priority) below[x] = {source, priority, color};
++  if(priority > below[x].priority) below[x] = {source, priority, color, plotObject};
+ }
+ 
+ //todo: name these variables more clearly ...
+@@ -447,7 +467,7 @@ auto PPU::Line::plotHD(Pixel* pixel, int x, uint8 source, uint8 priority, uint32
+   int xss = hires && subpixel ? (scale / 2 + ((scale & 1 == 1) && (x & 1 == 1))) : 0;
+   int ys = ppu.interlace() && ppu.field() ? scale / 2 : 0;
+   if(priority > pixel[x * scale + xss + ys * 256 * scale + wss].priority) {
+-    Pixel p = {source, priority, color};
++    Pixel p = {source, priority, color, plotObject};
+     int xsm = hires && !subpixel ? (scale / 2 + ((scale & 1 == 1) && (x & 1 == 1))) : scale;
+     int ysm = ppu.interlace() && !ppu.field() ? scale / 2 : scale;
+     for(int xs = xss; xs < xsm; xs++) {
+diff --git a/bsnes/sfc/ppu-fast/object.cpp b/bsnes/sfc/ppu-fast/object.cpp
+index 1fc167a..e0cb371 100644
+--- a/bsnes/sfc/ppu-fast/object.cpp
++++ b/bsnes/sfc/ppu-fast/object.cpp
+@@ -85,6 +85,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+       tile.priority = object.priority;
+       tile.palette = 128 + (object.palette << 4);
+       tile.hflip = object.hflip;
++      tile.index = item.index;
+ 
+       uint mirrorX = !object.hflip ? tileX : tileWidth - 1 - tileX;
+       uint address = tiledataAddress + ((characterY + (characterX + mirrorX & 15)) << 4);
+@@ -102,6 +103,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+ 
+   uint8_t palette[512] = {};//
+   uint8_t priority[512] = {};//
++  uint8_t index[512] = {};
+ 
+   for(uint n : range(ppu.TileLimit)) {
+     auto& tile = tiles[n];
+@@ -119,6 +121,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+         if(color) {
+           palette[tileX] = tile.palette + color;
+           priority[tileX] = self.priority[tile.priority];
++          index[tileX] = tile.index;
+         }
+       //}
+       tileX++;
+@@ -136,6 +139,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+     if(xc < wsl || xc >= wsr || (wsobj == 3 && (xc < 0 || xc >= 256))) continue;
+ 
+     uint32 mctc = luma[cgram[palette[x]]];
++    plotObject = index[x];
+     
+     if(ppufast.hires() && ppufast.hd()) {
+       // Match non-hires backgrounds in hires mode (see background)
+@@ -148,6 +152,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+       if(self.belowEnable && !windowBelow[ppufast.winXad(xc, true)])  plotBelow(xc, source, priority[x], mctc);
+     }
+   }
++  plotObject = 0xff;
+ }
+ 
+ auto PPU::oamAddressReset() -> void {
+diff --git a/bsnes/sfc/ppu-fast/ppu.cpp b/bsnes/sfc/ppu-fast/ppu.cpp
+index d7260af..6034c83 100644
+--- a/bsnes/sfc/ppu-fast/ppu.cpp
++++ b/bsnes/sfc/ppu-fast/ppu.cpp
+@@ -3,6 +3,9 @@
+ namespace SuperFamicom {
+ 
+ PPU& ppubase = ppu;
++RemasteriaMotion remasteriaMotion = {};
++auto remasteriaMotionData() -> const void* { return &remasteriaMotion; }
++auto remasteriaSetTop(uint top) -> void { remasteriaMotion.top = top; }
+ 
+ #define PPU PPUfast
+ #define ppu ppufast
+@@ -136,8 +139,8 @@ auto PPU::scanline() -> void {
+   if(vcounter() > 0 && vcounter() < vdisp()) {
+     latch.hires |= io.pseudoHires || io.bgMode == 5 || io.bgMode == 6;
+     //supersampling and EXTBG mode are not compatible, so disable supersampling in EXTBG mode //HD:disabled
+-    latch.hd |= /* io.bgMode == 7 && */ hdScale() > 0 /*&& (hdSupersample() == 0*/ /* || io.extbg == 1 */ /*)*/; //HD:deactivated dynamic scale switching for widescreen
+-    latch.ss |= /* io.bgMode == 7 && */ hdScale() > 0 && (hdSupersample() > 1 /* && io.extbg == 0 */ ); //HD:irrelevant, because always used ORed with latch.hd
++    latch.hd |= io.bgMode == 7 && hdScale() > 1 /*&& (hdSupersample() == 0*/ /* || io.extbg == 1 */ /*)*/; //HD:deactivated dynamic scale switching for widescreen
++    latch.ss |= io.bgMode == 7 && hdScale() > 1 && (hdSupersample() > 1 /* && io.extbg == 0 */ ); //HD:irrelevant, because always used ORed with latch.hd
+   }
+ 
+   if(vcounter() == vdisp()) {
+@@ -174,6 +177,8 @@ auto PPU::refresh() -> void {
+       }
+     }
+ 
++    remasteriaMotion.frame++;
++    remasteriaMotion.valid = !hd() && !hires() && !interlace();
+     if(auto device = controllerPort2.device) device->draw(output, pitch * sizeof(uint32), width, height);
+     platform->videoFrame(output, pitch * sizeof(uint32), width, height, hd() ? hdScale() : 1);
+ 
+diff --git a/bsnes/sfc/ppu-fast/ppu.hpp b/bsnes/sfc/ppu-fast/ppu.hpp
+index b4a71c0..b8a9422 100644
+--- a/bsnes/sfc/ppu-fast/ppu.hpp
++++ b/bsnes/sfc/ppu-fast/ppu.hpp
+@@ -255,12 +255,14 @@ public:
+     uint8 palette = 0;
+     bool hflip = 0;
+     uint32 data = 0;
++    uint8 index = 0;
+   };
+ 
+   struct Pixel {
+     uint8 source = 0;
+     uint8 priority = 0;
+     uint32 color = 0;
++    uint8 object = 0xff;  //RemasterIA: OAM index of OBJ pixels
+   };
+ 
+   //io.cpp
+@@ -345,6 +347,7 @@ public:
+   //unserialized:
+     uint y;  //constant
+     bool fieldID;
++    uint8 plotObject = 0xff;
+ 
+     IO io;
+     uint16 cgram[256];
+@@ -384,4 +387,20 @@ public:
+ 
+ extern PPU ppufast;
+ 
++//RemasterIA: what each visible pixel is made of, so the frontend can render in-between frames
++//with the game's real motion. Layout shared with engine/src/motion.h.
++struct RemasteriaMotion {
++  uint32_t frame;
++  uint8_t valid;               //false for HD (mode 7), hires and interlaced frames
++  uint8_t top;                 //rows the frontend crops from the top of the output
++  uint8_t source[240][256];    //0-3 BG1-BG4, 4-5 OBJ, 6 backdrop
++  uint8_t priority[240][256];
++  uint8_t object[240][256];    //OAM index of OBJ pixels
++  uint8_t mode[240];           //BG mode of each line; 0xff when blank
++  uint16_t hoffset[240][4];
++  uint16_t voffset[240][4];
++  struct { uint16_t x; uint8_t y, character, attributes, size; } objects[128];
++};
++extern RemasteriaMotion remasteriaMotion;
++
+ #undef PPU
+diff --git a/bsnes/target-libretro/libretro.cpp b/bsnes/target-libretro/libretro.cpp
+index 8a50f53..d2032c7 100644
+--- a/bsnes/target-libretro/libretro.cpp
++++ b/bsnes/target-libretro/libretro.cpp
+@@ -1136,3 +1136,11 @@ size_t retro_get_memory_size(unsigned id)
+ {
+ 	return 0;
+ }
++
++// RemasterIA: per-pixel layer/sprite data of the last frame (see sfc/ppu-fast/ppu.hpp).
++namespace SuperFamicom { auto remasteriaMotionData() -> const void*; }
++
++extern "C" RETRO_API const void *retro_remasteria_motion(void)
++{
++	return SuperFamicom::remasteriaMotionData();
++}
+diff --git a/bsnes/target-libretro/program.cpp b/bsnes/target-libretro/program.cpp
+index 9e8e28a..d2d7e3c 100644
+--- a/bsnes/target-libretro/program.cpp
++++ b/bsnes/target-libretro/program.cpp
+@@ -382,10 +382,13 @@ auto Program::load(uint id, string name, string type, vector<string> options) ->
+ 	return { id, options(0) };
+ }
+ 
++namespace SuperFamicom { auto remasteriaSetTop(uint top) -> void; }
++
+ auto Program::videoFrame(const uint32* data, uint pitch, uint width, uint height, uint scale) -> void {
+ 
+ 	uint offset = overscan ? 8 : 12;
+ 	uint multiplier = height / 215;
++	::SuperFamicom::remasteriaSetTop(offset);
+ 	data   += offset * (pitch >> 2) * multiplier;
+ 	height -= offset * 2 * multiplier;
+ 

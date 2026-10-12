@@ -25,6 +25,8 @@ typedef struct {
 	void (*fullscreen)(void);
 	void (*next_look)(void);
 	const char *(*look_name)(void);
+	void (*next_motion)(void);
+	const char *(*motion_name)(void);
 	void (*quit)(void);
 } MenuActions;
 

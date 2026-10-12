@@ -12,7 +12,7 @@
 #define REPEAT_RATE 5
 
 enum { SCREEN_MAIN, SCREEN_SAVE, SCREEN_LOAD, SCREEN_CONTROLS };
-enum { ITEM_CONTINUE, ITEM_SAVE, ITEM_LOAD, ITEM_CONTROLS, ITEM_LOOK, ITEM_FULLSCREEN, ITEM_QUIT, MAIN_ITEMS };
+enum { ITEM_CONTINUE, ITEM_SAVE, ITEM_LOAD, ITEM_CONTROLS, ITEM_LOOK, ITEM_MOTION, ITEM_FULLSCREEN, ITEM_QUIT, MAIN_ITEMS };
 #define CONTROL_ITEMS (BUTTONS + 2)
 
 typedef struct {
@@ -223,6 +223,7 @@ static void choose(void)
 			break;
 		case ITEM_CONTROLS: screen = SCREEN_CONTROLS; break;
 		case ITEM_LOOK: act.next_look(); break;
+		case ITEM_MOTION: act.next_motion(); break;
 		case ITEM_FULLSCREEN: act.fullscreen(); break;
 		case ITEM_QUIT: act.quit(); break;
 		}
@@ -280,9 +281,10 @@ void menu_update(void)
 static void draw_main(void)
 {
 	frame(24, 40, 208, 16 + MAIN_ITEMS * 14);
-	char look[48];
+	char look[48], motion[48];
 	snprintf(look, sizeof look, "Visual: %s", act.look_name());
-	const char *labels[MAIN_ITEMS] = { "Continuar", "Salvar estado", "Carregar estado", "Controles", look, "Tela cheia", "Sair do jogo" };
+	snprintf(motion, sizeof motion, "Movimento: %s", act.motion_name());
+	const char *labels[MAIN_ITEMS] = { "Continuar", "Salvar estado", "Carregar estado", "Controles", look, motion, "Tela cheia", "Sair do jogo" };
 	for (int i = 0; i < MAIN_ITEMS; i++) {
 		bool on = i == cursor[SCREEN_MAIN];
 		if (on)

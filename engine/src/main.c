@@ -8,7 +8,8 @@
  *   engine CORE ROM DATA_DIR [FRAMES]   development; with FRAMES, runs headless (records the intro)
  *
  * game.cfg has `key=value` lines: `title` names the window and the save folder, `video` picks the
- * look (pixel, crt; see video.c), every other key is passed to the core as an option
+ * look (pixel, crt; see video.c), `motion` smooth (in-between frames on 120 Hz displays, see motion.c)
+ * or original, every other key is passed to the core as an option
  * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMASTERIA_SHADERS.
  *
  * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
@@ -33,6 +34,7 @@
 
 #include "input.h"
 #include "menu.h"
+#include "motion.h"
 #include "video.h"
 
 #define ENV_GET_CAN_DUPE 3
@@ -89,7 +91,7 @@ static SDL_Window *window;
 static bool video_ready;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
-static bool fast_forward, quit, headless_start;
+static bool fast_forward, quit, headless_start, smooth_motion = true;
 static int pixel_format;
 static uint32_t thumb[THUMB_WIDTH * THUMB_HEIGHT];
 
@@ -155,6 +157,8 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 	if (data && video_ready) {
 		video_frame(data, width, height, pitch);
 		update_thumb(data, width, height, pitch);
+		if (pixel_format == VIDEO_XRGB8888)
+			motion_capture(data, width, height, pitch);
 	}
 }
 
@@ -301,6 +305,8 @@ static void read_config(const char *path)
 			snprintf(title, sizeof title, "%s", eq + 1);
 		else if (!strcmp(line, "video"))
 			snprintf(look, sizeof look, "%s", eq + 1);
+		else if (!strcmp(line, "motion"))
+			smooth_motion = strcmp(eq + 1, "original") != 0;
 		else if (options < MAX_OPTIONS)
 			option_keys[options] = strdup(line), option_values[options++] = strdup(eq + 1);
 	}
@@ -362,6 +368,16 @@ static void next_look(void)
 {
 	video_next_profile();
 	update_title();
+}
+
+static void next_motion(void)
+{
+	smooth_motion = !smooth_motion;
+}
+
+static const char *motion_name(void)
+{
+	return smooth_motion ? "suave" : "original";
 }
 
 static void request_quit(void)
@@ -453,6 +469,9 @@ int main(int argc, char **argv)
 	LOAD(serialize, "retro_serialize") LOAD(unserialize, "retro_unserialize")
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
+	const CoreMotion *(*core_motion)(void);
+	*(void **)&core_motion = dlsym(lib, "retro_remasteria_motion");
+	motion_init(core_motion);
 
 	char battery_path[PATH + 16], resume_path[PATH + 16];
 	snprintf(battery_path, sizeof battery_path, "%s/game.srm", data_dir);
@@ -517,7 +536,8 @@ int main(int argc, char **argv)
 		fail("não consegui iniciar o vídeo (OpenGL e shaders)");
 	update_title();
 	input_init(data_dir, controller_db[0] ? controller_db : NULL);
-	MenuActions actions = { save_slot, load_slot, slot_info, toggle_fullscreen, next_look, video_profile_name, request_quit };
+	MenuActions actions = { save_slot, load_slot, slot_info, toggle_fullscreen, next_look, video_profile_name,
+		next_motion, motion_name, request_quit };
 	menu_init(&actions, title);
 
 	SDL_AudioSpec want = { 0 }, have;
@@ -540,6 +560,11 @@ int main(int argc, char **argv)
 	/* Locked to the display, the game runs at its refresh rate (60.0 instead of 60.1 Hz): every
 	 * frame then lands on a refresh, with no periodic double step; audio rate control absorbs it. */
 	double rate = synced ? locked_rate : fps;
+	/* With two refreshes per game frame, the second shows the next frame and the first one the
+	 * halfway point between them (motion.c). */
+	bool can_interpolate = motion_available() && ((synced && refreshes_per_frame == 2) || getenv("REMASTERIA_CAPTURE_BETWEEN"));
+	bool show_current = false;
+	long between_frames = 0;
 
 	Uint64 frequency = SDL_GetPerformanceFrequency();
 	Uint64 clock_start = SDL_GetPerformanceCounter() - frequency / (Uint64)(2 * rate);  /* half-frame phase */
@@ -627,6 +652,22 @@ int main(int argc, char **argv)
 				running = false;
 			}
 		}
+		if (run_frame) {
+			const uint32_t *middle;
+			unsigned mw, mh;
+			show_current = false;
+			if (can_interpolate && smooth_motion && !fast_forward && due == 1 && (middle = motion_between(&mw, &mh))) {
+				video_frame(middle, mw, mh, mw * sizeof(uint32_t));
+				show_current = true;
+				between_frames++;
+			}
+		} else if (show_current) {
+			const uint32_t *now;
+			unsigned nw, nh;
+			if ((now = motion_current(&nw, &nh)))
+				video_frame(now, nw, nh, nw * sizeof(uint32_t));
+			show_current = false;
+		}
 		if (run_frame || synced) {
 			video_set_overlay(menu_draw(), MENU_WIDTH, MENU_HEIGHT);
 			video_present();
@@ -634,10 +675,11 @@ int main(int argc, char **argv)
 
 		if (show_stats && SDL_GetTicks() - stats_start >= 2000) {
 			Uint32 elapsed = SDL_GetTicks() - stats_start;
-			printf("tela %d Hz %s | jogo %.2f fps, %.1f ms por quadro | áudio %.0f ms na fila, taxa %.4f\n", refresh,
-				synced ? "(vsync)" : "(timer)", (frames_run_stats * 1000.0) / elapsed,
-				frames_run_stats ? core_ms / frames_run_stats : 0, SDL_GetQueuedAudioSize(audio) * 1000.0 / (want.freq * 4),
-				audio_ratio);
+			printf("tela %d Hz %s | jogo %.2f fps, %.1f ms por quadro | %ld quadros intermediários | áudio %.0f ms na fila, taxa %.4f\n",
+				refresh, synced ? "(vsync)" : "(timer)", (frames_run_stats * 1000.0) / elapsed,
+				frames_run_stats ? core_ms / frames_run_stats : 0, between_frames,
+				SDL_GetQueuedAudioSize(audio) * 1000.0 / (want.freq * 4), audio_ratio);
+			between_frames = 0;
 			fflush(stdout);
 			stats_start = SDL_GetTicks(), frames_run_stats = 0, core_ms = 0;
 		}
