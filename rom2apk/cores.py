@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import platform
 import shutil
 import sys
 import urllib.request
@@ -13,6 +14,7 @@ from .consoles import Console
 from .paths import home
 
 BUILDBOT_URL = "https://buildbot.libretro.com/nightly/android/latest/{abi}/{core}_libretro_android.so.zip"
+DESKTOP_URL = "https://buildbot.libretro.com/nightly/{platform}/latest/{core}_libretro.{ext}.zip"
 SUPPORTED_ABIS = ("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 
 
@@ -31,6 +33,31 @@ def core_path(console: Console, abi: str, refresh: bool = False) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".part")
         with zf.open(so_files[0]) as src, tmp.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp.replace(target)
+    return target
+
+
+def desktop_core_path(console: Console) -> Path:
+    """Core built for this computer, used to capture a frame for the icon."""
+    system = platform.system()
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x86_64", "AMD64": "x86_64"}.get(platform.machine())
+    if system == "Darwin" and arch:
+        url = DESKTOP_URL.format(platform=f"apple/osx/{arch}", core=console.core, ext="dylib")
+    elif system == "Linux" and arch == "x86_64":
+        url = DESKTOP_URL.format(platform="linux/x86_64", core=console.core, ext="so")
+    else:
+        raise RuntimeError(f"captura de tela não suportada em {system}/{platform.machine()}")
+
+    name = url.rsplit("/", 1)[1][:-len(".zip")]
+    target = home() / "cores" / "desktop" / name
+    if target.exists():
+        return target
+    print(f"Baixando núcleo {console.core} para este computador…", file=sys.stderr)
+    with zipfile.ZipFile(io.BytesIO(_download(url))) as zf:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".part")
+        with zf.open(name) as src, tmp.open("wb") as dst:
             shutil.copyfileobj(src, dst)
         tmp.replace(target)
     return target

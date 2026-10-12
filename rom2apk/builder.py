@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import enhance, libretrodroid, roms, toolchain
-from .cores import core_path
+from .cores import core_path, desktop_core_path
 from .paths import TEMPLATE_DIR, home
 
 _PACKAGE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+_SNAPSHOT_TIMEOUT = 120
+_ICON_STYLE = 1  # bump when rom2apk/icon.py changes so cached icons are regenerated
 _ICON_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
 
 
@@ -38,6 +40,7 @@ class BuildOptions:
     aspect: str = "4:3"
     bios: List[Path] = field(default_factory=list)
     abis: List[str] = field(default_factory=lambda: ["arm64-v8a"])
+    auto_icon: bool = True
     keystore: Optional[toolchain.Keystore] = None
     refresh_cores: bool = False
     version_code: int = 1
@@ -105,6 +108,10 @@ def build(opts: BuildOptions) -> Path:
         _write_app_name(main, game.title)
         if opts.icon:
             _install_icon(main, opts.icon)
+        elif opts.auto_icon:
+            art = _game_art(console, main / "assets" / "game" / game.main, game.version)
+            if art:
+                _install_adaptive_icon(main, art)
 
         (workspace / "local.properties").write_text(f"sdk.dir={sdk}\n")
         keystore = opts.keystore or toolchain.default_keystore(java_home)
@@ -170,6 +177,46 @@ def _install_icon(main: Path, icon: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     ext = ".jpg" if icon.suffix.lower() == ".jpeg" else icon.suffix.lower()
     shutil.copyfile(icon, target_dir / f"ic_launcher{ext}")
+
+
+def _game_art(console, game_file: Path, version: str) -> Optional[Path]:
+    """Icon layer made from a frame of the game itself; None if it can't be captured."""
+    cached = home() / "icons" / f"{version}-{_ICON_STYLE}.png"
+    if cached.exists():
+        return cached
+    print("Criando ícone a partir da tela do jogo…", file=sys.stderr)
+    try:
+        core = desktop_core_path(console)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        partial = cached.with_suffix(".part.png")
+        result = subprocess.run(
+            [sys.executable, "-m", "rom2apk.snapshot", str(core), str(game_file), str(partial)],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=_SNAPSHOT_TIMEOUT,
+        )
+        if result.returncode != 0 or not partial.exists():
+            lines = result.stderr.strip().splitlines()
+            raise RuntimeError(lines[-1] if lines else f"código {result.returncode}")
+        partial.replace(cached)
+        return cached
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+        print(f"aviso: ícone padrão será usado ({error})", file=sys.stderr)
+        return None
+
+
+def _install_adaptive_icon(main: Path, art: Path) -> None:
+    drawable = main / "res" / "drawable-nodpi"
+    drawable.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(art, drawable / "ic_launcher_art.png")
+    (main / "res" / "mipmap-anydpi-v26" / "ic_launcher.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <background android:drawable="@drawable/ic_launcher_art" />\n'
+        '    <foreground android:drawable="@android:color/transparent" />\n'
+        '</adaptive-icon>\n'
+    )
 
 
 def _run_gradle(workspace: Path, sdk: Path, java_home: Path, props: Dict[str, str], verbose: bool) -> None:

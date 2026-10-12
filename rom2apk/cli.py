@@ -27,6 +27,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--name", help="nome do app (padrão: nome do arquivo)")
     b.add_argument("--package", help="identificador do app, ex.: com.seunome.meujogo")
     b.add_argument("--icon", type=Path, help="ícone PNG/WEBP/JPG (quadrado, 512x512 recomendado)")
+    b.add_argument("--no-auto-icon", dest="auto_icon", action="store_false",
+                   help="não cria o ícone a partir da tela do jogo (usa o ícone padrão)")
     b.add_argument("--video", choices=enhance.VIDEO_PROFILES, default="hd",
                    help="perfil de imagem inicial (padrão: hd)")
     b.add_argument("--mode7", choices=list(enhance.SNES_MODE7), default="4x",
@@ -115,6 +117,7 @@ def _build(args: argparse.Namespace) -> int:
                 video=args.video,
                 scale=args.scale,
                 mode7=args.mode7,
+                auto_icon=args.auto_icon,
                 aspect=args.aspect,
                 bios=[p.resolve() for p in args.bios],
                 abis=args.abi or ["arm64-v8a"],

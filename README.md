@@ -60,6 +60,7 @@ python3 -m rom2apk build Jogo.sfc --video crt-arcade --aspect 8:7
 | `--scale 1-4` | resolução interna para PS1 (até 2x) e N64 (até 4x) |
 | `--console` | força o console quando a extensão é ambígua |
 | `--name`, `--icon`, `--package` | nome, ícone e identificador do app (só com uma ROM) |
+| `--no-auto-icon` | usa o ícone padrão em vez de criar um com a tela do jogo |
 | `--bios` | inclui um arquivo de BIOS (opcional para PS1) |
 | `--abi` | arquitetura alvo; padrão `arm64-v8a` (repita para incluir `armeabi-v7a` em aparelhos antigos) |
 | `--version-code` | aumente ao gerar uma nova versão de um APK já instalado |
@@ -85,6 +86,7 @@ Os filtros CRT simulam uma linha de varredura por linha do console, por isso o a
 
 - **Controles na tela** com layout de cada console (analógico e botões C no N64, △○✕□ no PS1), multitoque, deslizar entre botões e vibração. Tocar no espaço entre dois botões aperta os dois (Y+B para correr e pular). Tamanho e visibilidade ajustáveis.
 - **Controles físicos** Bluetooth/USB (Xbox, PlayStation, 8BitDo…), com vários jogadores, gatilhos analógicos e o analógico esquerdo funcionando como direcional em consoles 2D. Os botões seguem a posição (o de baixo é sempre o B do SNES) ou, para controles com layout Nintendo, o nome. Os controles da tela somem quando um controle é conectado.
+- **Ícone do próprio jogo**: o CLI roda o jogo por alguns segundos no computador (com o núcleo libretro para macOS/Linux), escolhe o quadro mais colorido — normalmente a tela de título — e cria um ícone adaptativo com ele. Use `--icon` para um ícone próprio. Não funciona com N64, que precisa de GPU.
 - **Continua de onde parou**: ao fechar o app, o jogo é salvo e reaberto no mesmo ponto.
 - **Menu** (botão ☰, voltar ou botão central do controle): 3 slots de save state, filtro de imagem, ajustes de controles, avanço rápido (3x), reiniciar e sair.
 - **Saves do jogo** (bateria/memory card) gravados automaticamente.
