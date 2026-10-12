@@ -2,11 +2,15 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
+.DS_Store
 
-template/.gradle/
-template/build/
-template/app/build/
-template/local.properties
+tools/rom2apk/template/.gradle/
+tools/rom2apk/template/build/
+tools/rom2apk/template/app/build/
+tools/rom2apk/template/local.properties
+
+# Saída das análises: contém código e dados do jogo, gerados a partir da sua ROM
+build/
 
 # ROMs, BIOS e chaves nunca vão para o repositório
 *.nes
@@ -17,6 +21,7 @@ template/local.properties
 *.gba
 *.md
 !README.md
+!**/README.md
 *.gen
 *.smd
 *.sms
