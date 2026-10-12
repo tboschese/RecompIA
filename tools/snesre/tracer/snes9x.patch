@@ -1,0 +1,65 @@
+diff --git a/cpuexec.cpp b/cpuexec.cpp
+index 0494810..cf67562 100644
+--- a/cpuexec.cpp
++++ b/cpuexec.cpp
+@@ -14,6 +14,7 @@
+ #include "spc7110.h"
+ #include "bsflash.h"
+ #include "snapshot.h"
++#include "snesre_trace.h"
+ #ifdef DEBUGGER
+ #include "debug.h"
+ #include "missing.h"
+@@ -168,6 +169,9 @@ void S9xMainLoop (void)
+ 				Opcodes = S9xOpcodesSlow;
+ 		}
+ 
++		if (snesre_trace_active)
++			snesre_trace(Registers.PBPC, Registers.P.W, ICPU.S9xOpLengths[Op]);
++
+ 		Registers.PCw++;
+ 		(*Opcodes[Op].S9xOpcode)();
+ 
+diff --git a/libretro/Makefile.common b/libretro/Makefile.common
+index 664c6f7..5325818 100644
+--- a/libretro/Makefile.common
++++ b/libretro/Makefile.common
+@@ -32,6 +32,7 @@ SOURCES_CXX := $(CORE_DIR)/apu/apu.cpp \
+ 	       $(CORE_DIR)/controls.cpp \
+ 	       $(CORE_DIR)/cpu.cpp \
+ 	       $(CORE_DIR)/cpuexec.cpp \
++	       $(CORE_DIR)/snesre_trace.cpp \
+ 	       $(CORE_DIR)/cpuops.cpp \
+ 	       $(CORE_DIR)/crosshairs.cpp \
+ 	       $(CORE_DIR)/dma.cpp \
+diff --git a/libretro/libretro.cpp b/libretro/libretro.cpp
+index b7aaace..5ae8d17 100644
+--- a/libretro/libretro.cpp
++++ b/libretro/libretro.cpp
+@@ -1,4 +1,5 @@
+ #include "libretro.h"
++#include "../snesre_trace.h"
+ #include <streams/file_stream.h>
+ #include <vfs/vfs_hybrid.h>
+ #include <file/file_path.h>
+@@ -1549,6 +1550,9 @@ bool retro_load_game(const struct retro_game_info *game)
+ 
+     Memory.ClearSRAM();
+ 
++    if (rom_loaded)
++        snesre_trace_start();
++
+     return rom_loaded;
+ }
+ 
+@@ -1687,7 +1691,9 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
+ }
+ 
+ void retro_unload_game(void)
+-{}
++{
++    snesre_trace_save();
++}
+ 
+ static void map_buttons();
+ 

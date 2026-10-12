@@ -51,6 +51,12 @@ class Rom:
             offset = (bank & 0x7F) * 0x8000 + (addr - 0x8000)
         return offset % len(self.data) if offset < len(self.data) * 2 else None
 
+    def address(self, offset: int) -> int:
+        """Canonical CPU address of a file offset (the FastROM mirror, where games usually run)."""
+        if self.mapping == HIROM:
+            return 0xC00000 + offset
+        return (0x80 | offset // 0x8000) << 16 | (0x8000 + offset % 0x8000)
+
     def read(self, address: int, size: int) -> Optional[bytes]:
         offset = self.offset(address)
         if offset is None or offset + size > len(self.data):
