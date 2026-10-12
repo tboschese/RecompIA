@@ -103,6 +103,15 @@ def _prepare_cue(cue: Path, rewritten: Path) -> Dict[str, Path]:
     return {"game.cue": rewritten, **files}
 
 
+def cue_tracks(cue: Path) -> List[Path]:
+    tracks = []
+    for line in cue.read_text(errors="replace").splitlines():
+        match = _CUE_FILE_LINE.match(line)
+        if match:
+            tracks.append(cue.parent / (match.group(2) or match.group(3)))
+    return tracks
+
+
 def _fingerprint(game: PreparedGame) -> str:
     digest = hashlib.sha1(game.console.core.encode())
     for name, path in sorted(game.files.items()):

@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -113,6 +114,10 @@ class VirtualPadView(
 
     init {
         isHapticFeedbackEnabled = true
+    }
+
+    private companion object {
+        const val NEUTRAL = 0xFF1A1A1A.toInt()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -242,18 +247,22 @@ class VirtualPadView(
         buttons.forEach { drawButton(canvas, it, it.keyCode in pressedKeys) }
     }
 
+    // Neutral controls use a dark fill with a light outline so they stay visible on both
+    // dark and bright game screens.
     private fun idleFill(color: Int = Color.WHITE) = fill.apply {
-        this.color = color
-        alpha = if (color == Color.WHITE) 55 else 110
+        this.color = if (color == Color.WHITE) NEUTRAL else color
+        alpha = if (color == Color.WHITE) 120 else 150
     }
 
     private fun pressedFill(color: Int = Color.WHITE) = fill.apply {
         this.color = color
-        alpha = 190
+        alpha = 200
     }
 
     private fun drawMenuButton(canvas: Canvas) {
         canvas.drawOval(menuBounds, idleFill())
+        stroke.alpha = 120
+        canvas.drawOval(menuBounds, stroke)
         val cx = menuBounds.centerX()
         val cy = menuBounds.centerY()
         val half = menuBounds.width() * 0.25f
@@ -301,8 +310,13 @@ class VirtualPadView(
                 val horizontal = RectF(dir.cx - arm, dir.cy - thickness, dir.cx + arm, dir.cy + thickness)
                 val vertical = RectF(dir.cx - thickness, dir.cy - arm, dir.cx + thickness, dir.cy + arm)
                 val corner = thickness * 0.4f
-                canvas.drawRoundRect(horizontal, corner, corner, idleFill())
-                canvas.drawRoundRect(vertical, corner, corner, idleFill())
+                val cross = Path().apply {
+                    addRoundRect(horizontal, corner, corner, Path.Direction.CW)
+                    op(Path().apply { addRoundRect(vertical, corner, corner, Path.Direction.CW) }, Path.Op.UNION)
+                }
+                canvas.drawPath(cross, idleFill())
+                stroke.alpha = 120
+                canvas.drawPath(cross, stroke)
                 val pressedPaint = pressedFill()
                 if (value.x != 0f) {
                     val left = if (value.x < 0) dir.cx - arm else dir.cx + thickness

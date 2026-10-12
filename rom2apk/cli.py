@@ -7,8 +7,9 @@ from typing import List, Optional
 
 from . import __version__, enhance, toolchain
 from .builder import BuildError, BuildOptions, build
-from .consoles import CONSOLES, DetectionError
+from .consoles import CONSOLES, DetectionError, supported_extensions
 from .cores import SUPPORTED_ABIS
+from .roms import cue_tracks
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -19,8 +20,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--version", action="version", version=f"rom2apk {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser("build", help="gera um APK a partir de uma ROM")
-    b.add_argument("rom", type=Path, help="arquivo da ROM (.nes, .sfc, .gba, .cue, .z64, .zip…)")
+    b = sub.add_parser("build", help="gera APKs a partir de ROMs")
+    b.add_argument("rom", type=Path, nargs="+",
+                   help="ROMs (.nes, .sfc, .gba, .cue, .z64, .zip…) ou pastas com ROMs")
     b.add_argument("--console", choices=sorted(CONSOLES), help="força o console (padrão: detecta pela extensão)")
     b.add_argument("--name", help="nome do app (padrão: nome do arquivo)")
     b.add_argument("--package", help="identificador do app, ex.: com.seunome.meujogo")
@@ -57,9 +59,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
 
+def _collect_roms(paths: List[Path]) -> List[Path]:
+    known = supported_extensions() | {".zip"}
+    roms: List[Path] = []
+    for path in paths:
+        if not path.exists():
+            raise BuildError(f"Arquivo não encontrado: {path}")
+        if path.is_file():
+            roms.append(path)
+            continue
+        files = sorted(
+            p for p in path.rglob("*")
+            if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in known
+        )
+        # Tracks referenced by a cue sheet are built through the .cue, not on their own.
+        tracks = set()
+        for cue in (p for p in files if p.suffix.lower() == ".cue"):
+            tracks.update(t.resolve() for t in cue_tracks(cue))
+        roms.extend(p for p in files if p.resolve() not in tracks)
+    if not roms:
+        raise BuildError("Nenhuma ROM encontrada.")
+    return roms
+
+
 def _build(args: argparse.Namespace) -> int:
-    if not args.rom.exists():
-        raise BuildError(f"Arquivo não encontrado: {args.rom}")
+    roms = _collect_roms(args.rom)
+    if len(roms) > 1 and (args.name or args.package or args.icon):
+        raise BuildError("--name, --package e --icon só podem ser usados com uma única ROM.")
     for extra in [args.icon, *args.bios]:
         if extra and not extra.exists():
             raise BuildError(f"Arquivo não encontrado: {extra}")
@@ -70,25 +96,41 @@ def _build(args: argparse.Namespace) -> int:
             raise BuildError("--keystore exige --keystore-pass e --key-alias")
         keystore = toolchain.custom_keystore(args.keystore, args.keystore_pass, args.key_alias, args.key_pass)
 
-    apk = build(BuildOptions(
-        rom=args.rom.resolve(),
-        out_dir=args.out.resolve(),
-        console=args.console,
-        title=args.name,
-        package=args.package,
-        icon=args.icon.resolve() if args.icon else None,
-        video=args.video,
-        scale=args.scale,
-        bios=[p.resolve() for p in args.bios],
-        abis=args.abi or ["arm64-v8a"],
-        keystore=keystore,
-        refresh_cores=args.refresh_cores,
-        version_code=args.version_code,
-        verbose=args.verbose,
-    ))
-    size_mb = apk.stat().st_size / 1e6
-    print(f"APK gerado: {apk} ({size_mb:.1f} MB)")
-    return 0
+    failures = []
+    for index, rom in enumerate(roms, start=1):
+        if len(roms) > 1:
+            print(f"\n[{index}/{len(roms)}] {rom.name}", file=sys.stderr)
+        try:
+            apk = build(BuildOptions(
+                rom=rom.resolve(),
+                out_dir=args.out.resolve(),
+                console=args.console,
+                title=args.name,
+                package=args.package,
+                icon=args.icon.resolve() if args.icon else None,
+                video=args.video,
+                scale=args.scale,
+                bios=[p.resolve() for p in args.bios],
+                abis=args.abi or ["arm64-v8a"],
+                keystore=keystore,
+                refresh_cores=args.refresh_cores,
+                version_code=args.version_code,
+                verbose=args.verbose,
+            ))
+        except (BuildError, DetectionError) as error:
+            if len(roms) == 1:
+                raise
+            print(f"erro: {error}", file=sys.stderr)
+            failures.append(rom.name)
+            continue
+        size_mb = apk.stat().st_size / 1e6
+        print(f"APK gerado: {apk} ({size_mb:.1f} MB)")
+
+    if len(roms) > 1:
+        print(f"\n{len(roms) - len(failures)} de {len(roms)} APKs gerados.", file=sys.stderr)
+        if failures:
+            print("Falharam: " + ", ".join(failures), file=sys.stderr)
+    return 1 if failures else 0
 
 
 def _consoles() -> int:

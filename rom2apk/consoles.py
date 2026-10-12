@@ -29,7 +29,7 @@ CONSOLES = {
         Console("md", "Mega Drive / Genesis", "genesis_plus_gx", (".md", ".gen", ".smd")),
         Console("sms", "Master System", "genesis_plus_gx", (".sms",)),
         Console("gg", "Game Gear", "genesis_plus_gx", (".gg",)),
-        Console("psx", "PlayStation", "pcsx_rearmed", (".cue", ".chd", ".pbp"), is_3d=True),
+        Console("psx", "PlayStation", "pcsx_rearmed", (".cue", ".chd", ".pbp", ".exe"), is_3d=True),
         Console("n64", "Nintendo 64", "mupen64plus_next_gles3", (".n64", ".z64", ".v64"), is_3d=True),
     ]
 }
