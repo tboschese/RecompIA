@@ -11,7 +11,10 @@ enum { VIDEO_0RGB1555, VIDEO_XRGB8888, VIDEO_RGB565 };
  * `profile` is "pixel" or "crt"; unknown names or missing shaders fall back to "pixel". */
 bool video_init(SDL_Window *window, const char *shader_dir, const char *profile);
 void video_set_format(int format);  /* libretro pixel format of the frames that follow */
+/* Receives a new game frame; video_present() draws the latest one and swaps (waits for vsync if on). */
 void video_frame(const void *data, unsigned width, unsigned height, size_t pitch);
+void video_present(void);
+bool video_set_vsync(bool on);
 void video_next_profile(void);
 const char *video_profile_name(void);
 /* Saves the next frame drawn, as it appears on screen, to a binary PPM (automated visual checks). */

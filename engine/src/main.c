@@ -38,6 +38,7 @@
 #define DEVICE_JOYPAD 1
 #define MEMORY_SAVE_RAM 0
 #define MAX_OPTIONS 64
+#define FAST_FORWARD_FRAMES 4
 #define PATH 4096
 
 enum { B, Y, SELECT, START, UP, DOWN, LEFT, RIGHT, A, X, L, R, BUTTONS };
@@ -123,10 +124,54 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 		video_frame(data, width, height, pitch);
 }
 
+/* Dynamic rate control: the game runs locked to the display's refresh, which is never exactly the
+ * console's 60.1 Hz, so the audio is resampled by up to ±0.5% (inaudible) to keep the output queue
+ * at its target instead of running dry (crackles) or growing (lag). */
+#define MAX_RATE_DEVIATION 0.005
+static double audio_ratio = 1.0, audio_position;
+static int16_t audio_last[2];
+static Uint32 audio_target_bytes;
+static bool audio_waiting = true;
+
+static void update_audio_ratio(void)
+{
+	if (!audio)
+		return;
+	Uint32 queued = SDL_GetQueuedAudioSize(audio);
+	if (queued == 0 && !audio_waiting) {  /* ran dry: refill before playing again */
+		audio_waiting = true;
+		SDL_PauseAudioDevice(audio, 1);
+	} else if (audio_waiting && queued >= audio_target_bytes) {
+		audio_waiting = false;
+		SDL_PauseAudioDevice(audio, 0);
+	} else if (queued > 4 * audio_target_bytes) {
+		SDL_ClearQueuedAudio(audio);
+	}
+	double error = ((double)audio_target_bytes - queued) / audio_target_bytes;
+	audio_ratio = 1.0 + MAX_RATE_DEVIATION * (error > 1 ? 1 : error < -1 ? -1 : error);
+}
+
 static size_t audio_batch(const int16_t *data, size_t frames)
 {
-	if (audio && !fast_forward)
-		SDL_QueueAudio(audio, data, (Uint32)(frames * 4));
+	if (!audio || fast_forward || !frames)
+		return frames;
+	static int16_t out[8192 * 2];
+	size_t produced = 0;
+	double step = 1.0 / audio_ratio;
+	/* Linear interpolation between consecutive stereo frames; position -1 is the last frame of the
+	 * previous batch, so batches join without clicks. */
+	while (audio_position < frames - 1 && produced < sizeof out / sizeof out[0] / 2) {
+		long i = (long)(audio_position >= 0 ? audio_position : -1);
+		double t = audio_position - i;
+		const int16_t *a = i < 0 ? audio_last : data + 2 * i, *b = data + 2 * (i + 1);
+		out[2 * produced] = (int16_t)(a[0] + (b[0] - a[0]) * t);
+		out[2 * produced + 1] = (int16_t)(a[1] + (b[1] - a[1]) * t);
+		produced++;
+		audio_position += step;
+	}
+	audio_position -= frames;
+	audio_last[0] = data[2 * (frames - 1)], audio_last[1] = data[2 * (frames - 1) + 1];
+	SDL_QueueAudio(audio, out, (Uint32)(produced * 4));
 	return frames;
 }
 
@@ -249,6 +294,12 @@ static void read_config(const char *path)
 			option_keys[options] = strdup(line), option_values[options++] = strdup(eq + 1);
 	}
 	free(text);
+}
+
+/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits. */
+static bool capture_mode(void)
+{
+	return getenv("REMAKEIA_CAPTURE") && getenv("REMAKEIA_CAPTURE_FRAME");
 }
 
 static void update_title(void)
@@ -396,15 +447,32 @@ int main(int argc, char **argv)
 	want.channels = 2;
 	want.samples = 1024;
 	audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-	SDL_PauseAudioDevice(audio, 0);
-	const Uint32 audio_target = (Uint32)(want.freq * 4 / 15);  /* ~67 ms queued */
+	audio_target_bytes = (Uint32)(want.freq * 4 / 20);  /* 50 ms queued */
 
-	Uint64 frequency = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter();
+	/* Frame pacing: lock the game to the display (vsync) when its refresh is a multiple of the
+	 * game's rate (60 Hz, 120 Hz ProMotion...), otherwise fall back to a timer. */
+	SDL_DisplayMode mode;
+	int refresh = SDL_GetWindowDisplayMode(window, &mode) == 0 && mode.refresh_rate > 0 ? mode.refresh_rate : 60;
+	int refreshes_per_frame = (int)(refresh / fps + 0.5);
+	if (refreshes_per_frame < 1)
+		refreshes_per_frame = 1;
+	double locked_rate = (double)refresh / refreshes_per_frame;
+	bool synced = !capture_mode() && locked_rate / fps > 0.98 && locked_rate / fps < 1.02 && video_set_vsync(true);
+	/* Locked to the display, the game runs at its refresh rate (60.0 instead of 60.1 Hz): every
+	 * frame then lands on a refresh, with no periodic double step; audio rate control absorbs it. */
+	double rate = synced ? locked_rate : fps;
+
+	Uint64 frequency = SDL_GetPerformanceFrequency();
+	Uint64 clock_start = SDL_GetPerformanceCounter() - frequency / (Uint64)(2 * rate);  /* half-frame phase */
+	long frames_done = 0;
+	double core_ms = 0;
 	Uint32 last_save = SDL_GetTicks();
 	bool running = true, paused = false;
-	/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits. */
-	long capture_frame = getenv("REMAKEIA_CAPTURE") && getenv("REMAKEIA_CAPTURE_FRAME") ? atol(getenv("REMAKEIA_CAPTURE_FRAME")) : 0;
+	long capture_frame = capture_mode() ? atol(getenv("REMAKEIA_CAPTURE_FRAME")) : 0;
 	long frames_run = 0;
+	bool show_stats = getenv("REMAKEIA_STATS") != NULL;  /* pacing diagnostics on stdout */
+	Uint32 stats_start = SDL_GetTicks();
+	long frames_run_stats = 0;
 	while (running) {
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
@@ -415,7 +483,7 @@ int main(int argc, char **argv)
 			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !capture_frame)
 				paused = true, SDL_PauseAudioDevice(audio, 1);
 			else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
-				paused = false, SDL_PauseAudioDevice(audio, 0), next = SDL_GetPerformanceCounter();
+				paused = false, clock_start = SDL_GetPerformanceCounter(), frames_done = 0;
 			else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
 				SDL_Keycode sym = event.key.keysym.sym;
 				if (sym == SDLK_F2) {
@@ -437,11 +505,39 @@ int main(int argc, char **argv)
 			continue;
 		}
 		read_input();
-		if (capture_frame && ++frames_run == capture_frame)
-			video_capture_next(getenv("REMAKEIA_CAPTURE"));
-		core.run();
-		if (capture_frame && frames_run == capture_frame)
-			running = false;
+		long due = capture_frame ? 1
+			: (long)((SDL_GetPerformanceCounter() - clock_start) * rate / frequency) - frames_done;
+		if (due > 3) {  /* fell far behind (window dragged, system busy): resync instead of rushing */
+			clock_start = SDL_GetPerformanceCounter() - frequency / (Uint64)(2 * rate);
+			frames_done = 0;
+			due = 1;
+		}
+		bool run_frame = due > 0;
+		for (long f = 0; f < due; f++) {
+			Uint64 t0 = SDL_GetPerformanceCounter();
+			for (int i = 0; i < (fast_forward ? FAST_FORWARD_FRAMES : 1); i++)
+				core.run();
+			core_ms += (SDL_GetPerformanceCounter() - t0) * 1000.0 / frequency;
+			frames_done++;
+			frames_run_stats++;
+			update_audio_ratio();
+			if (capture_frame && ++frames_run == capture_frame) {
+				video_capture_next(getenv("REMAKEIA_CAPTURE"));
+				running = false;
+			}
+		}
+		if (run_frame || synced)
+			video_present();
+
+		if (show_stats && SDL_GetTicks() - stats_start >= 2000) {
+			Uint32 elapsed = SDL_GetTicks() - stats_start;
+			printf("tela %d Hz %s | jogo %.2f fps, %.1f ms por quadro | áudio %.0f ms na fila, taxa %.4f\n", refresh,
+				synced ? "(vsync)" : "(timer)", (frames_run_stats * 1000.0) / elapsed,
+				frames_run_stats ? core_ms / frames_run_stats : 0, SDL_GetQueuedAudioSize(audio) * 1000.0 / (want.freq * 4),
+				audio_ratio);
+			fflush(stdout);
+			stats_start = SDL_GetTicks(), frames_run_stats = 0, core_ms = 0;
+		}
 
 		if (SDL_GetTicks() - last_save > 30000) {
 			save_battery(battery_path);
@@ -450,16 +546,8 @@ int main(int argc, char **argv)
 			last_save = SDL_GetTicks();
 		}
 
-		if (fast_forward || capture_frame) {
-			next = SDL_GetPerformanceCounter();
-			continue;
-		}
-		next += (Uint64)(frequency / fps);
-		Uint64 now = SDL_GetPerformanceCounter();
-		if (SDL_GetQueuedAudioSize(audio) > audio_target && next > now)
-			SDL_Delay((Uint32)((next - now) * 1000 / frequency));
-		else if (next + frequency / 10 < now)
-			next = now;
+		if (!synced && !capture_frame)
+			SDL_Delay(1);  /* without vsync, poll the clock gently */
 	}
 
 	save_battery(battery_path);

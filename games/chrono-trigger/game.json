@@ -4,7 +4,7 @@
  "app": {
   "title": "Chrono Trigger",
   "id": "chrono-trigger",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "icon_seconds": 30,
   "core": "bsnes-hd",
   "video": "pixel",
@@ -16,9 +16,9 @@
    "bsnes_mode7_perspective": "auto (wide)",
    "bsnes_mode7_supersample": "none",
    "bsnes_mode7_mosaic": "1x scale",
-   "bsnes_mode7_wsMode": "Mode 7",
-   "bsnes_mode7_widescreen": "16:9",
-   "bsnes_mode7_wsobj": "safe"
+   "bsnes_mode7_wsMode": "none",
+   "bsnes_mode7_widescreen": "none",
+   "bsnes_dsp_cubic": "ON"
   }
  },
  "entries": [],

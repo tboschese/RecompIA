@@ -185,7 +185,6 @@ bool video_init(SDL_Window *w, const char *shader_dir, const char *profile)
 		fprintf(stderr, "OpenGL: %s\n", SDL_GetError());
 		return false;
 	}
-	SDL_GL_SetSwapInterval(0);
 
 	for (int i = 0; i < PROFILES; i++) {
 		Profile *p = &profiles[i];
@@ -266,7 +265,13 @@ void video_frame(const void *data, unsigned width, unsigned height, size_t pitch
 {
 	frame_count++;
 	upload(data, width, height, pitch, pixel_format);
+}
 
+void video_present(void)
+{
+	if (!source_w)
+		return;
+	unsigned width = source_w, height = source_h;
 	int w, h;
 	SDL_GL_GetDrawableSize(window, &w, &h);
 	int hd = (int)height >= 2 * BASE_HEIGHT ? (int)(height + BASE_HEIGHT / 2) / BASE_HEIGHT : 1;
@@ -332,6 +337,11 @@ static void write_capture(int w, int h)
 void video_capture_next(const char *path)
 {
 	snprintf(capture_path, sizeof capture_path, "%s", path);
+}
+
+bool video_set_vsync(bool on)
+{
+	return SDL_GL_SetSwapInterval(on ? 1 : 0) == 0;
 }
 
 void video_set_format(int format)
