@@ -19,7 +19,7 @@ SNES9X_REPO = "https://github.com/libretro/snes9x.git"
 SNES9X_COMMIT = "fae2fea08f74180759ef540ee94259213f503480"
 SOURCES = Path(__file__).resolve().parent.parent / "tracer"
 ENGINE = Path(__file__).resolve().parents[3] / "engine"
-ENGINE_SOURCES = ("src/main.c", "src/video.c", "src/video.h", "src/input.c", "src/input.h", "src/menu.c", "src/menu.h", "src/motion.c", "src/motion.h",
+ENGINE_SOURCES = ("src/main.c", "src/video.c", "src/video.h", "src/input.c", "src/input.h", "src/menu.c", "src/menu.h", "src/motion.c", "src/motion.h", "src/hdpack.c", "src/hdpack.h",
                   "src/third_party/font8x8_basic.h", "src/third_party/font8x8_ext_latin.h")
 CORE_FILES = ("snesre_trace.cpp", "snesre_trace.h")
 
@@ -77,9 +77,9 @@ def engine_path() -> Path:
     print("Compilando o motor…", file=sys.stderr)
     flags = subprocess.run(["sdl2-config", "--cflags", "--libs"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
     if platform.system() == "Darwin":
-        flags += ["-framework", "OpenGL"]
+        flags += ["-framework", "OpenGL", "-lz"]
     else:
-        flags += ["-lGL"]
+        flags += ["-lGL", "-lz"]
     target.parent.mkdir(parents=True, exist_ok=True)
     _run(["cc", "-O2", "-std=c11", "-Wall", "-o", str(target), *(str(p) for p in sources if p.suffix == ".c"), *flags])
     return target

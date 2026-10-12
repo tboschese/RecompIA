@@ -47,6 +47,11 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
     shutil.copytree(tracer.ENGINE / "shaders", resources / "shaders")
     shutil.copy(cores.controller_db_path(), resources / "gamecontrollerdb.txt")
     config = [f"title={app['title']}", f"video={app.get('video', 'pixel')}"]
+    if app.get("art_capture", False):
+        config.append("art_capture=on")
+    pack = build_dir(app) / "hdpack.bin"
+    if pack.exists():
+        shutil.copy(pack, resources / "hdpack.bin")
     config += [f"{key}={value}" for key, value in app.get("options", {}).items()]
     (resources / "game.cfg").write_text("\n".join(config) + "\n")
     _bundle_sdl(executable, frameworks)
@@ -72,6 +77,11 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
         _run("codesign", "--force", "--sign", "-", str(binary))
     _run("codesign", "--force", "--sign", "-", str(bundle))
     return bundle
+
+
+def build_dir(app: dict) -> Path:
+    """Where a game's derived files live (ignored by Git): build/<id>."""
+    return TOOLS.parent / "build" / app["id"]
 
 
 def _bundle_sdl(executable: Path, frameworks: Path) -> None:

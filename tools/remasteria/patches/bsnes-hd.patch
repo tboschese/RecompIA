@@ -1,8 +1,39 @@
+diff --git a/bsnes/sfc/ppu-fast/background.cpp b/bsnes/sfc/ppu-fast/background.cpp
+index 4eac82f..a37e03a 100644
+--- a/bsnes/sfc/ppu-fast/background.cpp
++++ b/bsnes/sfc/ppu-fast/background.cpp
+@@ -69,6 +69,7 @@ auto PPU::Line::renderBackground(PPU::IO::Background& self, uint8 source) -> voi
+   uint mosaicPalette = 0;
+   uint8 mosaicPriority = 0;
+   uint16 mosaicColor = 0;
++  uint8 tileFormat = directColorMode || (self.mosaicEnable && io.mosaic.size > 1) ? 0 : self.tileMode + 1;
+ 
+   auto luma = ppu.lightTable[io.displayBrightness];
+   bool lastCropped = false;
+@@ -144,6 +145,10 @@ auto PPU::Line::renderBackground(PPU::IO::Background& self, uint8 source) -> voi
+ 
+         mosaicCounter = self.mosaicEnable ? io.mosaic.size : 1;
+         mosaicPalette = color;
++        plotTile = ppu.vramExt(tileNumber << colorShift);
++        plotTexel = (7 - shift) | (voffset & 7 ^ mirrorY) << 3 | (mirrorX ? 0x40 : 0) | (mirrorY ? 0x80 : 0);
++        plotPalette = paletteIndex;
++        plotFormat = tileFormat;
+         mosaicPriority = tilePriority;
+         if(directColorMode) {
+           mosaicColor = directColor(paletteNumber, mosaicPalette);
+@@ -183,6 +188,7 @@ auto PPU::Line::renderBackground(PPU::IO::Background& self, uint8 source) -> voi
+       }
+     }
+   }
++  plotFormat = 0;
+ }
+ 
+ auto PPU::Line::getTile(PPU::IO::Background& self, uint hoffset, uint voffset) -> uint {
 diff --git a/bsnes/sfc/ppu-fast/line.cpp b/bsnes/sfc/ppu-fast/line.cpp
-index 551430c..ad5575c 100644
+index 551430c..703c541 100644
 --- a/bsnes/sfc/ppu-fast/line.cpp
 +++ b/bsnes/sfc/ppu-fast/line.cpp
-@@ -72,6 +72,11 @@ auto PPU::Line::flush() -> void {
+@@ -72,6 +72,12 @@ auto PPU::Line::flush() -> void {
    }
  
    if(Line::count) {
@@ -11,16 +42,18 @@ index 551430c..ad5575c 100644
 +      remasteriaMotion.objects[n] = {o.x, o.y, o.character,
 +        uint8_t(o.nameselect | o.palette << 1 | o.priority << 4 | o.hflip << 6 | o.vflip << 7), o.size};
 +    }
++    memcpy(remasteriaMotion.vram, ppu.vram, sizeof remasteriaMotion.vram);
      if(ppu.hdScale() > 1) cacheMode7HD();
      #pragma omp parallel for if(Line::count >= 8)
      for(uint y = 0; y < Line::count; y++) {
-@@ -181,10 +186,19 @@ auto PPU::Line::render(bool fieldID) -> void {
+@@ -181,10 +187,22 @@ auto PPU::Line::render(bool fieldID) -> void {
    ? (!ppu.hires() ? 256 : 512)
    : ((256+2*ppu.widescreen()) * scale * scale));
  
 +  if(y < 240) remasteriaMotion.mode[y] = io.displayDisable ? 0xff : io.bgMode;
    if(io.displayDisable) {
 +    if(y < 240) memset(remasteriaMotion.source[y], Source::COL, 256);
++    if(y < 240) memset(remasteriaMotion.format[y], 0, 256);
      memory::fill<uint32>(output, width);
      return;
    }
@@ -30,11 +63,13 @@ index 551430c..ad5575c 100644
 +      remasteriaMotion.hoffset[y][n] = bgs[n]->hoffset;
 +      remasteriaMotion.voffset[y][n] = bgs[n]->voffset;
 +    }
++    remasteriaMotion.brightness[y] = io.displayBrightness;
++    memcpy(remasteriaMotion.cgram[y], cgram, sizeof cgram);
 +  }
  
    bool hires = io.pseudoHires || io.bgMode == 5 || io.bgMode == 6;
    
-@@ -359,6 +373,12 @@ auto PPU::Line::render(bool fieldID) -> void {
+@@ -359,6 +377,17 @@ auto PPU::Line::render(bool fieldID) -> void {
      }
    } else if(width == 256) for(uint x : range(256)) {
      *output++ = pixel(x, above[x], below[x], 0, 0, 0, bgFixedColors[0]);
@@ -43,75 +78,95 @@ index 551430c..ad5575c 100644
 +      remasteriaMotion.source[row][x] = above[x].source;
 +      remasteriaMotion.priority[row][x] = above[x].priority;
 +      remasteriaMotion.object[row][x] = above[x].object;
++      remasteriaMotion.tile[row][x] = above[x].tile;
++      remasteriaMotion.texel[row][x] = above[x].texel;
++      remasteriaMotion.palette[row][x] = above[x].palette;
++      remasteriaMotion.format[row][x] = windowAbove[x] ? above[x].format : 0;
++      remasteriaMotion.color[row][x] = above[x].color;
 +    }
    } else if(!hires) for(uint x : range(256)) {
      auto color = pixel(x, above[x], below[x], 0, 0, 0, bgFixedColors[0]);
      *output++ = color;
-@@ -432,12 +452,12 @@ auto PPU::Line::directColor(uint paletteIndex, uint paletteColor) const -> uint3
+@@ -432,12 +461,12 @@ auto PPU::Line::directColor(uint paletteIndex, uint paletteColor) const -> uint3
  
  auto PPU::Line::plotAbove(int x, uint8 source, uint8 priority, uint32 color) -> void {
    if(ppu.hd() || ppu.ss()) return plotHD(above, x, source, priority, color, false, false);
 -  if(priority > above[x].priority) above[x] = {source, priority, color};
-+  if(priority > above[x].priority) above[x] = {source, priority, color, plotObject};
++  if(priority > above[x].priority) above[x] = {source, priority, color, plotObject, plotTile, plotTexel, plotPalette, plotFormat};
  }
  
  auto PPU::Line::plotBelow(int x, uint8 source, uint8 priority, uint32 color) -> void {
    if(ppu.hd() || ppu.ss()) return plotHD(below, x, source, priority, color, false, false);
 -  if(priority > below[x].priority) below[x] = {source, priority, color};
-+  if(priority > below[x].priority) below[x] = {source, priority, color, plotObject};
++  if(priority > below[x].priority) below[x] = {source, priority, color, plotObject, plotTile, plotTexel, plotPalette, plotFormat};
  }
  
  //todo: name these variables more clearly ...
-@@ -447,7 +467,7 @@ auto PPU::Line::plotHD(Pixel* pixel, int x, uint8 source, uint8 priority, uint32
+@@ -447,7 +476,7 @@ auto PPU::Line::plotHD(Pixel* pixel, int x, uint8 source, uint8 priority, uint32
    int xss = hires && subpixel ? (scale / 2 + ((scale & 1 == 1) && (x & 1 == 1))) : 0;
    int ys = ppu.interlace() && ppu.field() ? scale / 2 : 0;
    if(priority > pixel[x * scale + xss + ys * 256 * scale + wss].priority) {
 -    Pixel p = {source, priority, color};
-+    Pixel p = {source, priority, color, plotObject};
++    Pixel p = {source, priority, color, plotObject, plotTile, plotTexel, plotPalette, plotFormat};
      int xsm = hires && !subpixel ? (scale / 2 + ((scale & 1 == 1) && (x & 1 == 1))) : scale;
      int ysm = ppu.interlace() && !ppu.field() ? scale / 2 : scale;
      for(int xs = xss; xs < xsm; xs++) {
 diff --git a/bsnes/sfc/ppu-fast/object.cpp b/bsnes/sfc/ppu-fast/object.cpp
-index 1fc167a..e0cb371 100644
+index 1fc167a..cdfc859 100644
 --- a/bsnes/sfc/ppu-fast/object.cpp
 +++ b/bsnes/sfc/ppu-fast/object.cpp
-@@ -85,6 +85,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+@@ -85,9 +85,13 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
        tile.priority = object.priority;
        tile.palette = 128 + (object.palette << 4);
        tile.hflip = object.hflip;
 +      tile.index = item.index;
++      tile.row = y & 7;
++      tile.vflip = object.vflip;
  
        uint mirrorX = !object.hflip ? tileX : tileWidth - 1 - tileX;
        uint address = tiledataAddress + ((characterY + (characterX + mirrorX & 15)) << 4);
-@@ -102,6 +103,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
++      tile.base = ppu.vramExt(address & 0xfff0);
+       address = ppu.vramExt((address & 0xfff0 /*0x7ff0*/) + (y & 7));
+       tile.data  = ppu.vram[address + 0] <<  0;
+       tile.data |= ppu.vram[address + 8] << 16;
+@@ -102,6 +106,9 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
  
    uint8_t palette[512] = {};//
    uint8_t priority[512] = {};//
 +  uint8_t index[512] = {};
++  uint16_t base[512] = {};
++  uint8_t texel[512] = {};
  
    for(uint n : range(ppu.TileLimit)) {
      auto& tile = tiles[n];
-@@ -119,6 +121,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+@@ -119,6 +126,9 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
          if(color) {
            palette[tileX] = tile.palette + color;
            priority[tileX] = self.priority[tile.priority];
 +          index[tileX] = tile.index;
++          base[tileX] = tile.base;
++          texel[tileX] = (7 - shift) | tile.row << 3 | (tile.hflip ? 0x40 : 0) | (tile.vflip ? 0x80 : 0);
          }
        //}
        tileX++;
-@@ -136,6 +139,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+@@ -136,6 +146,11 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
      if(xc < wsl || xc >= wsr || (wsobj == 3 && (xc < 0 || xc >= 256))) continue;
  
      uint32 mctc = luma[cgram[palette[x]]];
 +    plotObject = index[x];
++    plotTile = base[x];
++    plotTexel = texel[x];
++    plotPalette = palette[x] & 0xf0;
++    plotFormat = 2;
      
      if(ppufast.hires() && ppufast.hd()) {
        // Match non-hires backgrounds in hires mode (see background)
-@@ -148,6 +152,7 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
+@@ -148,6 +163,8 @@ auto PPU::Line::renderObject(PPU::IO::Object& self) -> void {
        if(self.belowEnable && !windowBelow[ppufast.winXad(xc, true)])  plotBelow(xc, source, priority[x], mctc);
      }
    }
 +  plotObject = 0xff;
++  plotFormat = 0;
  }
  
  auto PPU::oamAddressReset() -> void {
@@ -150,14 +205,17 @@ index d7260af..6034c83 100644
      platform->videoFrame(output, pitch * sizeof(uint32), width, height, hd() ? hdScale() : 1);
  
 diff --git a/bsnes/sfc/ppu-fast/ppu.hpp b/bsnes/sfc/ppu-fast/ppu.hpp
-index b4a71c0..b8a9422 100644
+index b4a71c0..92ffc87 100644
 --- a/bsnes/sfc/ppu-fast/ppu.hpp
 +++ b/bsnes/sfc/ppu-fast/ppu.hpp
-@@ -255,12 +255,14 @@ public:
+@@ -255,12 +255,21 @@ public:
      uint8 palette = 0;
      bool hflip = 0;
      uint32 data = 0;
 +    uint8 index = 0;
++    uint16 base = 0;
++    uint8 row = 0;
++    bool vflip = 0;
    };
  
    struct Pixel {
@@ -165,18 +223,26 @@ index b4a71c0..b8a9422 100644
      uint8 priority = 0;
      uint32 color = 0;
 +    uint8 object = 0xff;  //RemasterIA: OAM index of OBJ pixels
++    uint16 tile = 0;      //RemasterIA: tile identity, see RemasteriaMotion
++    uint8 texel = 0;
++    uint8 palette = 0;
++    uint8 format = 0;
    };
  
    //io.cpp
-@@ -345,6 +347,7 @@ public:
+@@ -345,6 +354,11 @@ public:
    //unserialized:
      uint y;  //constant
      bool fieldID;
 +    uint8 plotObject = 0xff;
++    uint16 plotTile = 0;
++    uint8 plotTexel = 0;
++    uint8 plotPalette = 0;
++    uint8 plotFormat = 0;
  
      IO io;
      uint16 cgram[256];
-@@ -384,4 +387,20 @@ public:
+@@ -384,4 +398,29 @@ public:
  
  extern PPU ppufast;
  
@@ -193,6 +259,15 @@ index b4a71c0..b8a9422 100644
 +  uint16_t hoffset[240][4];
 +  uint16_t voffset[240][4];
 +  struct { uint16_t x; uint8_t y, character, attributes, size; } objects[128];
++  //Tile identity of each pixel, for HD art replacement (engine/src/hdpack.c).
++  uint8_t brightness[240];     //0-15
++  uint16_t tile[240][256];     //VRAM word address of the tile's first row
++  uint8_t texel[240][256];     //x | y << 3 inside the tile data, hflip << 6, vflip << 7
++  uint8_t palette[240][256];   //CGRAM index of the tile's color 0
++  uint8_t format[240][256];    //0 none (backdrop, mode 7, mosaic, direct color), 1 2bpp, 2 4bpp, 3 8bpp
++  uint32_t color[240][256];    //the pixel's own color, before color math
++  uint16_t cgram[240][256];    //palette of each line
++  uint16_t vram[32768];        //VRAM as the frame was drawn
 +};
 +extern RemasteriaMotion remasteriaMotion;
 +

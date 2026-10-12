@@ -31,7 +31,8 @@ open "dist/Chrono Trigger.app"
 
 O app é independente: leva dentro dele o motor, o núcleo, o SDL, a base de controles e a sua ROM. Ele continua de onde você parou e guarda os saves e os controles em `~/Library/Application Support/RemasterIA/<jogo>/`. O núcleo e o motor são compilados do código-fonte na primeira vez e ficam guardados em `~/.snesre`.
 
-**Qualidade — Chrono Trigger 0.5:**
+**Qualidade — Chrono Trigger 0.6:**
+- **Arte remasterizada com IA, tile por tile:** cada tile do cenário e cada pedaço de sprite é redesenhado em 4x e trocado em tempo real pelo motor. O núcleo informa, para cada pixel da tela, de qual tile, de qual paleta e de qual ponto do tile ele veio. Com isso, a arte nova acompanha exatamente a rolagem, as animações, os espelhamentos, as trocas de paleta, os fades e as transparências do jogo, sem tremer de um quadro para o outro como um filtro de tela. A IA ([Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN), modelo para anime, rodando na GPU do Mac) redesenha a cena inteira, para ter contexto, e cada tile recebe a média de todas as cenas em que apareceu. Dá para voltar à arte original no menu. Hoje o pacote cobre a abertura do jogo; o resto vem jogando (veja abaixo).
 - **Pixel perfect:** cada pixel do jogo vira um bloco exato de pixels da tela, sempre na maior escala inteira que cabe na janela, sem nenhuma suavização.
 - **Mode 7 em HD:** renderização nativa 4x com correção de perspectiva (bsnes-hd), ligada só nas cenas em Mode 7.
 - **Sem limite de sprites:** nada pisca.
@@ -42,10 +43,21 @@ O app é independente: leva dentro dele o motor, o núcleo, o SDL, a base de con
 **Todo jogo já nasce com:**
 - **Controles USB e Bluetooth nativos:** é só conectar, inclusive com o jogo aberto. Os controles conhecidos (a base do SDL mais a [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB), com milhares de modelos) já entram no layout do SNES. Qualquer outro funciona depois de mapeado no menu. O segundo controle é o jogador 2.
 - **Teclado** com todas as teclas remapeáveis.
-- **Menu de pausa** (Esc, botão Home do controle ou Select+Start) com: continuar, salvar estado, carregar estado, controles, visual (pixel perfect ou CRT), movimento (suave ou original), tela cheia e sair.
+- **Menu de pausa** (Esc, botão Home do controle ou Select+Start) com: continuar, salvar estado, carregar estado, controles, visual (pixel perfect ou CRT), arte (remasterizada ou original), movimento (suave ou original), tela cheia e sair.
 - **8 slots de save state**, cada um com uma miniatura da cena, data e hora. Além disso, o jogo salva sozinho ao fechar e continua dali ao abrir.
 
 Teclado padrão: setas, Z/X/A/S = B/A/Y/X, Q/W = L/R, Enter = Start, Shift direito = Select. Atalhos: Esc = menu, Tab (segurar) = acelerar, F2 = visual, F5/F7 = salvar/carregar no slot atual, F11 ou Cmd+F = tela cheia.
+
+### Remasterizar a arte jogando
+
+Enquanto você joga, o app guarda as cenas que mostram tiles que ainda não foram redesenhados, em `~/Library/Application Support/RemasterIA/<jogo>/arte/`. Ele só guarda as cenas com brilho total e sem transparência por cima, para a IA ver a arte limpa, e só quando a cena tem tiles novos. Depois, gere o pacote e o app de novo:
+
+```bash
+PYTHONPATH=tools/remasteria python3 -m remasteria hdpack games/chrono-trigger   # IA: cerca de 0,4 s por cena
+PYTHONPATH=tools/remasteria python3 -m remasteria mac games/chrono-trigger "Chrono Trigger (USA).sfc"
+```
+
+O pacote fica em `build/chrono-trigger/hdpack.bin`, fora do Git, porque é feito a partir da ROM. Precisa de `pip3 install --user numpy`; o Real-ESRGAN é baixado sozinho na primeira vez.
 
 ## Projeto atual: Chrono Trigger (USA)
 
@@ -54,6 +66,7 @@ Teclado padrão: setas, Z/X/A/S = B/A/Y/X, Q/W = L/R, Enter = Start, Shift direi
 3. **Recompilador** — cada função 65816 vira uma função C. O jogo roda nativamente e é comparado quadro a quadro com um emulador, para garantir que se comporta igual.
 4. **Renderizador próprio** — o motor desenha a cena a partir do estado gráfico do jogo (tiles, sprites, rolagem e paleta), não da imagem pronta do console. É isso que permite:
    - interpolar posições para 90/120 Hz *(primeira versão feita: quadros intermediários a 120 Hz a partir das camadas e sprites que o núcleo exporta; falta o Mode 7)*;
+   - trocar a arte por versões em alta resolução *(primeira versão feita: pacote HD redesenhado por IA, tile por tile; falta cobrir o jogo inteiro e tratar as bordas dos sprites)*;
    - separar camadas para profundidade e paralaxe.
 5. **Plataformas** — macOS *(feito: app pixel perfect com HD Mode 7 e vsync)*; Android com SDL2 + NDK, controles na tela e Bluetooth (os do rom2apk).
 

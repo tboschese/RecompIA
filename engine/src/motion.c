@@ -8,11 +8,13 @@
 #define MAX_STEP 24 /* pixels per frame; a bigger jump is a cut, not motion */
 #define NO_MATCH 0xff
 #define BACKWARD 0x80 /* depth flag: pixel filled from the newer frame */
+#define HD 4          /* scale of the HD art frames */
 
 typedef struct {
-	bool ok;
+	bool ok, has_hd;
 	unsigned height;
 	uint32_t pixels[MAX_HEIGHT * WIDTH];
+	uint32_t hd[MAX_HEIGHT * HD * WIDTH * HD];
 	CoreMotion motion;
 } Frame;
 
@@ -20,8 +22,8 @@ static const CoreMotion *(*core_motion)(void);
 static Frame frames[2];
 static int latest;
 static unsigned captured;
-static uint32_t between[MAX_HEIGHT * 2 * WIDTH * 2];
-static uint8_t depth[MAX_HEIGHT * 2 * WIDTH * 2];
+static uint32_t between[MAX_HEIGHT * HD * WIDTH * HD];
+static uint8_t depth[MAX_HEIGHT * HD * WIDTH * HD];
 
 void motion_init(const CoreMotion *(*source)(void))
 {
@@ -33,7 +35,7 @@ bool motion_available(void)
 	return core_motion != NULL;
 }
 
-void motion_capture(const void *pixels, unsigned width, unsigned height, size_t pitch)
+void motion_capture(const void *pixels, unsigned width, unsigned height, size_t pitch, const uint32_t *hd)
 {
 	if (!core_motion)
 		return;
@@ -48,6 +50,9 @@ void motion_capture(const void *pixels, unsigned width, unsigned height, size_t 
 	f->height = height;
 	for (unsigned y = 0; y < height; y++)
 		memcpy(&f->pixels[y * WIDTH], (const char *)pixels + y * pitch, WIDTH * sizeof(uint32_t));
+	f->has_hd = hd != NULL;
+	if (hd)
+		memcpy(f->hd, hd, (size_t)WIDTH * HD * height * HD * sizeof(uint32_t));
 	memcpy(&f->motion, m, sizeof *m);
 }
 
@@ -98,29 +103,30 @@ static void pixel_motion(const CoreMotion *a, const CoreMotion *b, const uint8_t
 		*dx = *dy = 0;
 }
 
-/* Moves every pixel of `f` halfway towards `other`, drawing 2x2 blocks with priority. The newer
- * frame only fills what the older one leaves uncovered. */
-static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool backward)
+/* Moves every pixel of `f` halfway towards `other`, drawing scale x scale blocks with priority
+ * (the pixel's color, or its block of HD art). The newer frame only fills what the older one
+ * leaves uncovered. */
+static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool backward, int scale)
 {
 	const CoreMotion *a = &f->motion, *b = &other->motion;
-	int out_w = WIDTH * 2, out_h = (int)f->height * 2;
+	int out_w = WIDTH * scale, out_h = (int)f->height * scale;
 	for (unsigned y = 0; y < f->height; y++) {
 		int row = (int)y + a->top;
 		for (int x = 0; x < WIDTH; x++) {
 			int dx, dy;
 			pixel_motion(a, b, match, row, x, &dx, &dy);
-			int tx = 2 * x + dx, ty = 2 * (int)y + dy;
+			int tx = scale * x + dx * scale / 2, ty = scale * (int)y + dy * scale / 2;
 			uint8_t z = (uint8_t)((a->priority[row][x] & 0x7f) + 1);
 			uint32_t color = f->pixels[y * WIDTH + x];
-			for (int j = 0; j < 2; j++)
-				for (int i = 0; i < 2; i++) {
+			for (int j = 0; j < scale; j++)
+				for (int i = 0; i < scale; i++) {
 					int px = tx + i, py = ty + j;
 					if (px < 0 || py < 0 || px >= out_w || py >= out_h)
 						continue;
 					size_t at = (size_t)py * out_w + px;
 					bool draw = backward ? depth[at] == 0 || ((depth[at] & BACKWARD) && z > (depth[at] & 0x7f)) : z > depth[at];
 					if (draw) {
-						between[at] = color;
+						between[at] = f->has_hd ? f->hd[(size_t)(scale * (int)y + j) * out_w + scale * x + i] : color;
 						depth[at] = backward ? z | BACKWARD : z;
 					}
 				}
@@ -139,14 +145,15 @@ const uint32_t *motion_between(unsigned *width, unsigned *height)
 	match_objects(&old->motion, &now->motion, forward);
 	match_objects(&now->motion, &old->motion, backward);
 
-	unsigned out_w = WIDTH * 2, out_h = old->height * 2;
+	int scale = old->has_hd && now->has_hd ? HD : 2;
+	unsigned out_w = WIDTH * scale, out_h = old->height * scale;
 	memset(depth, 0, (size_t)out_w * out_h);
-	splat(old, now, forward, false);
-	splat(now, old, backward, true);
+	splat(old, now, forward, false, scale);
+	splat(now, old, backward, true, scale);
 	for (unsigned y = 0; y < out_h; y++)
 		for (unsigned x = 0; x < out_w; x++)
 			if (!depth[y * out_w + x])
-				between[y * out_w + x] = old->pixels[(y / 2) * WIDTH + x / 2];
+				between[y * out_w + x] = scale == HD ? old->hd[y * out_w + x] : old->pixels[(y / 2) * WIDTH + x / 2];
 	*width = out_w;
 	*height = out_h;
 	return between;
@@ -157,7 +164,8 @@ const uint32_t *motion_current(unsigned *width, unsigned *height)
 	const Frame *now = &frames[latest];
 	if (!captured || !now->ok)
 		return NULL;
-	*width = WIDTH;
-	*height = now->height;
-	return now->pixels;
+	int scale = now->has_hd ? HD : 1;
+	*width = WIDTH * scale;
+	*height = now->height * scale;
+	return now->has_hd ? now->hd : now->pixels;
 }

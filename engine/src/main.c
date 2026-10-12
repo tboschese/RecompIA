@@ -9,8 +9,11 @@
  *
  * game.cfg has `key=value` lines: `title` names the window and the save folder, `video` picks the
  * look (pixel, crt; see video.c), `motion` smooth (in-between frames on 120 Hz displays, see motion.c)
- * or original, every other key is passed to the core as an option
- * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMASTERIA_SHADERS.
+ * or original, `art` hd (the redrawn tiles of Resources/hdpack.bin, see hdpack.c) or original,
+ * `art_capture` on (saves the frames with new tiles to DATA_DIR/arte, for the pack builder); every
+ * other key is passed to the core as an option (e.g. snes9x_mode7_hires=4x_hv). Shaders come from
+ * Resources/shaders, or $REMASTERIA_SHADERS; in development $REMASTERIA_HDPACK and
+ * $REMASTERIA_ART_CAPTURE (a folder) do the same for the art.
  *
  * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
  * live in DATA_DIR, by default ~/Library/Application Support/RemasterIA/<title>/.
@@ -32,6 +35,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "hdpack.h"
 #include "input.h"
 #include "menu.h"
 #include "motion.h"
@@ -91,9 +95,10 @@ static SDL_Window *window;
 static bool video_ready;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
-static bool fast_forward, quit, headless_start, smooth_motion = true;
+static bool fast_forward, quit, headless_start, smooth_motion = true, hd_art = true, art_capture;
 static int pixel_format;
 static uint32_t thumb[THUMB_WIDTH * THUMB_HEIGHT];
+static const CoreMotion *(*core_motion)(void);
 
 static bool environment(unsigned cmd, void *data)
 {
@@ -154,12 +159,23 @@ static void update_thumb(const void *data, unsigned width, unsigned height, size
 
 static void video(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-	if (data && video_ready) {
+	if (!data)
+		return;
+	const CoreMotion *m = pixel_format == VIDEO_XRGB8888 && core_motion ? core_motion() : NULL;
+	bool tiles = m && m->valid && width == 256 && height + m->top <= 240;
+	if (tiles && art_capture && !fast_forward)
+		hdpack_capture(data, pitch, height, m);
+	if (!video_ready)
+		return;
+	unsigned hd_width, hd_height;
+	const uint32_t *hd = tiles && hd_art ? hdpack_render(data, pitch, height, m, &hd_width, &hd_height) : NULL;
+	if (hd)
+		video_frame(hd, hd_width, hd_height, hd_width * sizeof(uint32_t));
+	else
 		video_frame(data, width, height, pitch);
-		update_thumb(data, width, height, pitch);
-		if (pixel_format == VIDEO_XRGB8888)
-			motion_capture(data, width, height, pitch);
-	}
+	update_thumb(data, width, height, pitch);
+	if (pixel_format == VIDEO_XRGB8888)
+		motion_capture(data, width, height, pitch, hd);
 }
 
 /* Dynamic rate control: the game runs locked to the display's refresh, which is never exactly the
@@ -307,6 +323,10 @@ static void read_config(const char *path)
 			snprintf(look, sizeof look, "%s", eq + 1);
 		else if (!strcmp(line, "motion"))
 			smooth_motion = strcmp(eq + 1, "original") != 0;
+		else if (!strcmp(line, "art"))
+			hd_art = strcmp(eq + 1, "original") != 0;
+		else if (!strcmp(line, "art_capture"))
+			art_capture = !strcmp(eq + 1, "on");
 		else if (options < MAX_OPTIONS)
 			option_keys[options] = strdup(line), option_values[options++] = strdup(eq + 1);
 	}
@@ -380,6 +400,16 @@ static const char *motion_name(void)
 	return smooth_motion ? "suave" : "original";
 }
 
+static void next_art(void)
+{
+	hd_art = !hd_art;
+}
+
+static const char *art_name(void)
+{
+	return !hdpack_loaded() ? "sem pacote HD" : hd_art ? "remasterizada" : "original";
+}
+
 static void request_quit(void)
 {
 	quit = true;
@@ -411,7 +441,7 @@ static void fail(const char *message)
 
 int main(int argc, char **argv)
 {
-	char core_path[PATH], rom_path[PATH], shader_dir[PATH] = "", controller_db[PATH] = "";
+	char core_path[PATH], rom_path[PATH], shader_dir[PATH] = "", controller_db[PATH] = "", hdpack_path[PATH] = "";
 	long headless_frames = 0;
 
 	if (argc == 1) {
@@ -424,6 +454,7 @@ int main(int argc, char **argv)
 		snprintf(rom_path, sizeof rom_path, "%sgame.sfc", base);
 		snprintf(shader_dir, sizeof shader_dir, "%sshaders", base);
 		snprintf(controller_db, sizeof controller_db, "%sgamecontrollerdb.txt", base);
+		snprintf(hdpack_path, sizeof hdpack_path, "%shdpack.bin", base);
 		read_config(config);
 		SDL_free(base);
 		char *pref = SDL_GetPrefPath("RemasterIA", title);
@@ -456,6 +487,22 @@ int main(int argc, char **argv)
 		snprintf(shader_dir, sizeof shader_dir, "%s", getenv("REMASTERIA_SHADERS"));
 	if (getenv("REMASTERIA_CONTROLLER_DB"))
 		snprintf(controller_db, sizeof controller_db, "%s", getenv("REMASTERIA_CONTROLLER_DB"));
+	if (getenv("REMASTERIA_HDPACK"))
+		snprintf(hdpack_path, sizeof hdpack_path, "%s", getenv("REMASTERIA_HDPACK"));
+	if (getenv("REMASTERIA_ART"))
+		hd_art = strcmp(getenv("REMASTERIA_ART"), "original") != 0;
+	if (hdpack_path[0])
+		hdpack_load(hdpack_path);
+	char capture_dir[PATH + 16] = "";
+	if (getenv("REMASTERIA_ART_CAPTURE"))
+		snprintf(capture_dir, sizeof capture_dir, "%s", getenv("REMASTERIA_ART_CAPTURE"));
+	else if (art_capture)
+		snprintf(capture_dir, sizeof capture_dir, "%s/arte", data_dir);
+	if (capture_dir[0]) {
+		mkdir(capture_dir, 0755);
+		hdpack_capture_init(capture_dir);
+		art_capture = true;
+	}
 
 	void *lib = dlopen(core_path, RTLD_NOW);
 	if (!lib)
@@ -469,7 +516,6 @@ int main(int argc, char **argv)
 	LOAD(serialize, "retro_serialize") LOAD(unserialize, "retro_unserialize")
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
-	const CoreMotion *(*core_motion)(void);
 	*(void **)&core_motion = dlsym(lib, "retro_remasteria_motion");
 	motion_init(core_motion);
 
@@ -508,11 +554,13 @@ int main(int argc, char **argv)
 	double fps = av.fps > 0 ? av.fps : 60.0;
 
 	if (headless_frames) {
+		bool idle = getenv("REMASTERIA_HEADLESS_IDLE") != NULL;  /* let the intro play instead of pressing Start */
 		for (long i = 0; i < headless_frames; i++) {
-			headless_start = i % 120 < 4;
+			headless_start = !idle && i % 120 < 4;
 			core.run();
 		}
 		save_battery(battery_path);
+		hdpack_capture_save();
 		core.unload_game();
 		core.deinit();
 		SDL_Quit();
@@ -537,7 +585,7 @@ int main(int argc, char **argv)
 	update_title();
 	input_init(data_dir, controller_db[0] ? controller_db : NULL);
 	MenuActions actions = { save_slot, load_slot, slot_info, toggle_fullscreen, next_look, video_profile_name,
-		next_motion, motion_name, request_quit };
+		next_art, art_name, next_motion, motion_name, request_quit };
 	menu_init(&actions, title);
 
 	SDL_AudioSpec want = { 0 }, have;
@@ -569,7 +617,7 @@ int main(int argc, char **argv)
 	Uint64 frequency = SDL_GetPerformanceFrequency();
 	Uint64 clock_start = SDL_GetPerformanceCounter() - frequency / (Uint64)(2 * rate);  /* half-frame phase */
 	long frames_done = 0;
-	double core_ms = 0;
+	double core_ms = 0, between_ms = 0;
 	Uint32 last_save = SDL_GetTicks();
 	bool running = true, paused = false;
 	long capture_frame = capture_mode() ? atol(getenv("REMASTERIA_CAPTURE_FRAME")) : 0;
@@ -655,8 +703,10 @@ int main(int argc, char **argv)
 		if (run_frame) {
 			const uint32_t *middle;
 			unsigned mw, mh;
+			Uint64 t0 = SDL_GetPerformanceCounter();
 			show_current = false;
 			if (can_interpolate && smooth_motion && !fast_forward && due == 1 && (middle = motion_between(&mw, &mh))) {
+				between_ms += (SDL_GetPerformanceCounter() - t0) * 1000.0 / frequency;
 				video_frame(middle, mw, mh, mw * sizeof(uint32_t));
 				show_current = true;
 				between_frames++;
@@ -675,19 +725,21 @@ int main(int argc, char **argv)
 
 		if (show_stats && SDL_GetTicks() - stats_start >= 2000) {
 			Uint32 elapsed = SDL_GetTicks() - stats_start;
-			printf("tela %d Hz %s | jogo %.2f fps, %.1f ms por quadro | %ld quadros intermediários | áudio %.0f ms na fila, taxa %.4f\n",
+			printf("tela %d Hz %s | jogo %.2f fps, %.1f ms por quadro | %ld quadros intermediários (%.1f ms) | áudio %.0f ms na fila, taxa %.4f\n",
 				refresh, synced ? "(vsync)" : "(timer)", (frames_run_stats * 1000.0) / elapsed,
 				frames_run_stats ? core_ms / frames_run_stats : 0, between_frames,
+				between_frames ? between_ms / between_frames : 0,
 				SDL_GetQueuedAudioSize(audio) * 1000.0 / (want.freq * 4), audio_ratio);
 			between_frames = 0;
 			fflush(stdout);
-			stats_start = SDL_GetTicks(), frames_run_stats = 0, core_ms = 0;
+			stats_start = SDL_GetTicks(), frames_run_stats = 0, core_ms = 0, between_ms = 0;
 		}
 
 		if (SDL_GetTicks() - last_save > 30000) {
 			save_battery(battery_path);
 			if (core.trace_save)
 				core.trace_save();
+			hdpack_capture_save();
 			last_save = SDL_GetTicks();
 		}
 
@@ -696,6 +748,7 @@ int main(int argc, char **argv)
 	}
 
 	save_battery(battery_path);
+	hdpack_capture_save();
 	if (argc == 1)
 		save_state(resume_path);
 	core.unload_game();
