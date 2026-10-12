@@ -1,5 +1,5 @@
-#ifndef REMAKEIA_VIDEO_H
-#define REMAKEIA_VIDEO_H
+#ifndef REMASTERIA_VIDEO_H
+#define REMASTERIA_VIDEO_H
 
 #include <SDL.h>
 #include <stdbool.h>

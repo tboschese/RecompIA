@@ -1,6 +1,6 @@
 """macOS app icon from a gameplay frame: the rom2apk framing, inside the standard rounded square.
 
-Runs in its own process (`python -m remakeia.icon CORE ROM SECONDS OUT.png`) because the core may
+Runs in its own process (`python -m remasteria.icon CORE ROM SECONDS OUT.png`) because the core may
 crash. SECONDS picks the moment of the intro to capture (no buttons pressed); 0 lets rom2apk pick
 the most colorful frame on its own.
 """
@@ -25,7 +25,7 @@ def capture_at(core_path: Path, game_path: Path, seconds: float):
     """The frame shown `seconds` after power-on, and the display aspect ratio."""
     s = snapshot
     core = ctypes.CDLL(str(core_path))
-    work_dir = ctypes.create_string_buffer(tempfile.mkdtemp(prefix="remakeia-icon-").encode())
+    work_dir = ctypes.create_string_buffer(tempfile.mkdtemp(prefix="remasteria-icon-").encode())
     state = {"format": s.PIXEL_0RGB1555, "frame": None}
 
     def environment(cmd: int, data: int) -> bool:

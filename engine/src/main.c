@@ -1,4 +1,4 @@
-/* RemakeIA engine: runs a game project on the desktop (macOS first; Android later through SDL2).
+/* RemasterIA engine: runs a game project on the desktop (macOS first; Android later through SDL2).
  *
  * Today the SNES hardware comes from a libretro core (snes9x with snesre's tracer); the plan is to
  * replace its CPU, function by function, with the recompiled game code, while this layer grows the
@@ -9,10 +9,10 @@
  *
  * game.cfg has `key=value` lines: `title` names the window and the save folder, `video` picks the
  * look (pixel, crt; see video.c), every other key is passed to the core as an option
- * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMAKEIA_SHADERS.
+ * (e.g. snes9x_mode7_hires=4x_hv). Shaders come from Resources/shaders, or $REMASTERIA_SHADERS.
  *
  * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
- * live in DATA_DIR, by default ~/Library/Application Support/RemakeIA/<title>/.
+ * live in DATA_DIR, by default ~/Library/Application Support/RemasterIA/<title>/.
  *
  * Controls: keyboard and gamepads (see input.c), remappable in the pause menu (Esc, the gamepad's
  * Home button or Select+Start), which also saves and loads the state slots (see menu.c).
@@ -79,7 +79,7 @@ static struct {
 	void (*trace_save)(void);
 } core;
 
-static char title[256] = "RemakeIA";
+static char title[256] = "RemasterIA";
 static char look[32] = "pixel";
 static char *option_keys[MAX_OPTIONS], *option_values[MAX_OPTIONS];
 static int options;
@@ -369,11 +369,11 @@ static void request_quit(void)
 	quit = true;
 }
 
-/* Automated visual checks: REMAKEIA_CAPTURE=out.ppm REMAKEIA_CAPTURE_FRAME=N saves frame N and quits;
- * REMAKEIA_CAPTURE_MENU=main|save|load|controls shows that menu screen in the capture. */
+/* Automated visual checks: REMASTERIA_CAPTURE=out.ppm REMASTERIA_CAPTURE_FRAME=N saves frame N and quits;
+ * REMASTERIA_CAPTURE_MENU=main|save|load|controls shows that menu screen in the capture. */
 static bool capture_mode(void)
 {
-	return getenv("REMAKEIA_CAPTURE") && getenv("REMAKEIA_CAPTURE_FRAME");
+	return getenv("REMASTERIA_CAPTURE") && getenv("REMASTERIA_CAPTURE_FRAME");
 }
 
 static void update_title(void)
@@ -410,7 +410,7 @@ int main(int argc, char **argv)
 		snprintf(controller_db, sizeof controller_db, "%sgamecontrollerdb.txt", base);
 		read_config(config);
 		SDL_free(base);
-		char *pref = SDL_GetPrefPath("RemakeIA", title);
+		char *pref = SDL_GetPrefPath("RemasterIA", title);
 		if (!pref)
 			fail("não consegui criar a pasta de saves");
 		snprintf(data_dir, sizeof data_dir, "%s", pref);
@@ -432,14 +432,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "uso: %s [NÚCLEO ROM PASTA_DE_DADOS [QUADROS]]\n", argv[0]);
 		return 2;
 	}
-	if (argc != 1 && getenv("REMAKEIA_CONFIG"))
-		read_config(getenv("REMAKEIA_CONFIG"));
-	if (getenv("REMAKEIA_VIDEO"))
-		snprintf(look, sizeof look, "%s", getenv("REMAKEIA_VIDEO"));
-	if (getenv("REMAKEIA_SHADERS"))
-		snprintf(shader_dir, sizeof shader_dir, "%s", getenv("REMAKEIA_SHADERS"));
-	if (getenv("REMAKEIA_CONTROLLER_DB"))
-		snprintf(controller_db, sizeof controller_db, "%s", getenv("REMAKEIA_CONTROLLER_DB"));
+	if (argc != 1 && getenv("REMASTERIA_CONFIG"))
+		read_config(getenv("REMASTERIA_CONFIG"));
+	if (getenv("REMASTERIA_VIDEO"))
+		snprintf(look, sizeof look, "%s", getenv("REMASTERIA_VIDEO"));
+	if (getenv("REMASTERIA_SHADERS"))
+		snprintf(shader_dir, sizeof shader_dir, "%s", getenv("REMASTERIA_SHADERS"));
+	if (getenv("REMASTERIA_CONTROLLER_DB"))
+		snprintf(controller_db, sizeof controller_db, "%s", getenv("REMASTERIA_CONTROLLER_DB"));
 
 	void *lib = dlopen(core_path, RTLD_NOW);
 	if (!lib)
@@ -547,9 +547,9 @@ int main(int argc, char **argv)
 	double core_ms = 0;
 	Uint32 last_save = SDL_GetTicks();
 	bool running = true, paused = false;
-	long capture_frame = capture_mode() ? atol(getenv("REMAKEIA_CAPTURE_FRAME")) : 0;
+	long capture_frame = capture_mode() ? atol(getenv("REMASTERIA_CAPTURE_FRAME")) : 0;
 	long frames_run = 0;
-	bool show_stats = getenv("REMAKEIA_STATS") != NULL;  /* pacing diagnostics on stdout */
+	bool show_stats = getenv("REMASTERIA_STATS") != NULL;  /* pacing diagnostics on stdout */
 	Uint32 stats_start = SDL_GetTicks();
 	long frames_run_stats = 0;
 	while (running) {
@@ -621,9 +621,9 @@ int main(int argc, char **argv)
 			frames_run_stats++;
 			update_audio_ratio();
 			if (capture_frame && ++frames_run == capture_frame) {
-				if (getenv("REMAKEIA_CAPTURE_MENU"))
-					menu_show(getenv("REMAKEIA_CAPTURE_MENU"));
-				video_capture_next(getenv("REMAKEIA_CAPTURE"));
+				if (getenv("REMASTERIA_CAPTURE_MENU"))
+					menu_show(getenv("REMASTERIA_CAPTURE_MENU"));
+				video_capture_next(getenv("REMASTERIA_CAPTURE"));
 				running = false;
 			}
 		}

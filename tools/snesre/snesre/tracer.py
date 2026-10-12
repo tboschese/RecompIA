@@ -1,4 +1,4 @@
-"""Builds and runs the tracing player: snes9x (libretro) with snesre's tracer, run by the RemakeIA engine.
+"""Builds and runs the tracing player: snes9x (libretro) with snesre's tracer, run by the RemasterIA engine.
 
 Everything is built once from source and cached in ~/.snesre, keyed by the snes9x commit and a hash
 of our sources, so editing the tracer or the engine rebuilds it automatically.
@@ -90,7 +90,7 @@ def play(rom: Path, trace: Path, saves: Path, frames: Optional[int] = None) -> i
     core, player = core_path(), engine_path()
     saves.mkdir(parents=True, exist_ok=True)
     trace.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, SNESRE_TRACE=str(trace.resolve()), REMAKEIA_SHADERS=str(ENGINE / "shaders"))
+    env = dict(os.environ, SNESRE_TRACE=str(trace.resolve()), REMASTERIA_SHADERS=str(ENGINE / "shaders"))
     cmd = [str(player), str(core), str(rom.resolve()), str(saves.resolve())]
     if frames:
         cmd.append(str(frames))

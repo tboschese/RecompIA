@@ -56,7 +56,7 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
         plistlib.dump({
             "CFBundleName": app["title"],
             "CFBundleDisplayName": app["title"],
-            "CFBundleIdentifier": f"com.remakeia.{app['id']}",
+            "CFBundleIdentifier": f"com.remasteria.{app['id']}",
             "CFBundleExecutable": app["id"],
             "CFBundleIconFile": "AppIcon",
             "CFBundlePackageType": "APPL",
@@ -107,8 +107,8 @@ def _icon(core: Path, rom_path: Path, sha1: str, seconds: float, target: Path) -
         print("Capturando uma cena do jogo para o ícone…", file=sys.stderr)
         cached.parent.mkdir(parents=True, exist_ok=True)
         partial = cached.with_suffix(".part.png")
-        subprocess.run([sys.executable, "-m", "remakeia.icon", str(core), str(rom_path.resolve()), f"{seconds:g}", str(partial)],
-                       cwd=TOOLS / "remakeia", check=True, timeout=180)
+        subprocess.run([sys.executable, "-m", "remasteria.icon", str(core), str(rom_path.resolve()), f"{seconds:g}", str(partial)],
+                       cwd=TOOLS / "remasteria", check=True, timeout=180)
         partial.replace(cached)
 
     with tempfile.TemporaryDirectory() as tmp:

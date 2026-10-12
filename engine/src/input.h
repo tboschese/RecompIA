@@ -1,5 +1,5 @@
-#ifndef REMAKEIA_INPUT_H
-#define REMAKEIA_INPUT_H
+#ifndef REMASTERIA_INPUT_H
+#define REMASTERIA_INPUT_H
 
 #include <SDL.h>
 #include <stdbool.h>

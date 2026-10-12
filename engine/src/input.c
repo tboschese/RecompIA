@@ -116,7 +116,7 @@ void input_init(const char *data_dir, const char *controller_db)
 	snprintf(config_path, sizeof config_path, "%s/controls.cfg", data_dir);
 	load();
 	if (controller_db && SDL_GameControllerAddMappingsFromFile(controller_db) < 0)
-		fprintf(stderr, "remakeia: %s: %s\n", controller_db, SDL_GetError());
+		fprintf(stderr, "remasteria: %s: %s\n", controller_db, SDL_GetError());
 }
 
 static Pad *find_pad(SDL_JoystickID id)

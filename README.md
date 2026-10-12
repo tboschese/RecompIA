@@ -1,4 +1,4 @@
-# RemakeIA
+# RemasterIA
 
 Versões refeitas de jogos clássicos para telas modernas, com qualidade acima de um emulador. O código original é analisado e recompilado para código nativo, e a partir daí o jogo ganha:
 - **pixel perfect** em qualquer tela;
@@ -15,7 +15,7 @@ O repositório guarda **só código e anotações**. ROMs e tudo que é extraíd
 games/<jogo>/      um projeto por jogo: versão esperada da ROM, opções do app, pontos de entrada, nomes de rotinas
 engine/            o motor (C + SDL2 + OpenGL) que roda os jogos: macOS hoje, Android depois
 engine/shaders/    visuais: pixel perfect (padrão) e CRT
-tools/remakeia/    gera os aplicativos (macOS: .app)
+tools/remasteria/    gera os aplicativos (macOS: .app)
 tools/snesre/      engenharia reversa de SNES (desmontador 65816, rastreamento de execução)
 tools/rom2apk/     o caminho rápido: empacota uma ROM com emulador em um APK
 build/, dist/      saída das análises e aplicativos gerados (ignorados pelo Git)
@@ -25,11 +25,11 @@ build/, dist/      saída das análises e aplicativos gerados (ignorados pelo Gi
 
 ```bash
 brew install sdl2   # uma vez
-PYTHONPATH=tools/remakeia python3 -m remakeia mac games/chrono-trigger "Chrono Trigger (USA).sfc"
+PYTHONPATH=tools/remasteria python3 -m remasteria mac games/chrono-trigger "Chrono Trigger (USA).sfc"
 open "dist/Chrono Trigger.app"
 ```
 
-O app é independente: leva dentro dele o motor, o núcleo, o SDL, a base de controles e a sua ROM. Ele continua de onde você parou e guarda os saves e os controles em `~/Library/Application Support/RemakeIA/<jogo>/`. O núcleo e o motor são compilados do código-fonte na primeira vez e ficam guardados em `~/.snesre`.
+O app é independente: leva dentro dele o motor, o núcleo, o SDL, a base de controles e a sua ROM. Ele continua de onde você parou e guarda os saves e os controles em `~/Library/Application Support/RemasterIA/<jogo>/`. O núcleo e o motor são compilados do código-fonte na primeira vez e ficam guardados em `~/.snesre`.
 
 **Qualidade — Chrono Trigger 0.4:**
 - **Pixel perfect:** cada pixel do jogo vira um bloco exato de pixels da tela, sempre na maior escala inteira que cabe na janela, sem nenhuma suavização.

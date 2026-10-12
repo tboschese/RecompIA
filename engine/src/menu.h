@@ -1,5 +1,5 @@
-#ifndef REMAKEIA_MENU_H
-#define REMAKEIA_MENU_H
+#ifndef REMASTERIA_MENU_H
+#define REMASTERIA_MENU_H
 
 #include <SDL.h>
 #include <stdbool.h>

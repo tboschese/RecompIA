@@ -53,7 +53,7 @@ def run_analysis(args) -> int:
     if not args.trace:
         candidates = [out / "trace.bin", *sorted(out.glob("*.cdl"))]
         if "app" in game:
-            candidates.append(Path.home() / "Library" / "Application Support" / "RemakeIA" / game["app"]["title"] / "trace.bin")
+            candidates.append(Path.home() / "Library" / "Application Support" / "RemasterIA" / game["app"]["title"] / "trace.bin")
         paths += [p for p in candidates if p.exists()]
     trace = None
     for path in paths:
