@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import enhance, libretrodroid, roms, toolchain
+from . import enhance, libretrodroid, patches, roms, toolchain
 from .cores import core_path, desktop_core_path
 from .paths import TEMPLATE_DIR, home
 
@@ -41,6 +41,7 @@ class BuildOptions:
     bios: List[Path] = field(default_factory=list)
     abis: List[str] = field(default_factory=lambda: ["arm64-v8a"])
     auto_icon: bool = True
+    patch: Optional[Path] = None
     keystore: Optional[toolchain.Keystore] = None
     refresh_cores: bool = False
     version_code: int = 1
@@ -57,7 +58,10 @@ def build(opts: BuildOptions) -> Path:
     if opts.icon and opts.icon.suffix.lower() not in _ICON_EXTENSIONS:
         raise BuildError(f"Ícone precisa ser {', '.join(_ICON_EXTENSIONS)}")
 
-    game = roms.prepare(opts.rom, opts.console, opts.title)
+    try:
+        game = roms.prepare(opts.rom, opts.console, opts.title, opts.patch)
+    except patches.PatchError as error:
+        raise BuildError(f"Não foi possível aplicar o patch: {error}") from error
     try:
         console = game.console
         package = opts.package or f"com.rom2apk.{console.id}.{roms.slugify(game.title)}"
@@ -66,6 +70,8 @@ def build(opts: BuildOptions) -> Path:
 
         scale = enhance.resolve_scale(console, opts.scale)
         variables = enhance.core_variables(console, opts.video, scale, opts.mode7, opts.aspect)
+        if "game.msu" in game.files:
+            variables["snes9x_msu1_enhanced_audio"] = "enabled"
         cores = {abi: core_path(console, abi, opts.refresh_cores) for abi in opts.abis}
 
         details = f"Console: {console.name} · núcleo {console.core} · vídeo {opts.video}"
@@ -73,6 +79,9 @@ def build(opts: BuildOptions) -> Path:
             details += f" · resolução {scale}x"
         if console.id == "snes":
             details += f" · Mode 7 HD {opts.mode7} · proporção {opts.aspect}"
+        tracks = sum(1 for name in game.files if name.endswith(".pcm"))
+        if tracks:
+            details += f" · MSU-1 com {tracks} faixa(s)"
         print(details, file=sys.stderr)
         print(f"Pacote: {package}", file=sys.stderr)
 

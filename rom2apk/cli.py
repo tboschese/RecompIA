@@ -27,6 +27,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--name", help="nome do app (padrão: nome do arquivo)")
     b.add_argument("--package", help="identificador do app, ex.: com.seunome.meujogo")
     b.add_argument("--icon", type=Path, help="ícone PNG/WEBP/JPG (quadrado, 512x512 recomendado)")
+    b.add_argument("--patch", type=Path,
+                   help="patch IPS/BPS aplicado à ROM (traduções, hacks MSU-1…)")
     b.add_argument("--no-auto-icon", dest="auto_icon", action="store_false",
                    help="não cria o ícone a partir da tela do jogo (usa o ícone padrão)")
     b.add_argument("--video", choices=enhance.VIDEO_PROFILES, default="hd",
@@ -90,9 +92,9 @@ def _collect_roms(paths: List[Path]) -> List[Path]:
 
 def _build(args: argparse.Namespace) -> int:
     roms = _collect_roms(args.rom)
-    if len(roms) > 1 and (args.name or args.package or args.icon):
-        raise BuildError("--name, --package e --icon só podem ser usados com uma única ROM.")
-    for extra in [args.icon, *args.bios]:
+    if len(roms) > 1 and (args.name or args.package or args.icon or args.patch):
+        raise BuildError("--name, --package, --icon e --patch só podem ser usados com uma única ROM.")
+    for extra in [args.icon, args.patch, *args.bios]:
         if extra and not extra.exists():
             raise BuildError(f"Arquivo não encontrado: {extra}")
 
@@ -118,6 +120,7 @@ def _build(args: argparse.Namespace) -> int:
                 scale=args.scale,
                 mode7=args.mode7,
                 auto_icon=args.auto_icon,
+                patch=args.patch.resolve() if args.patch else None,
                 aspect=args.aspect,
                 bios=[p.resolve() for p in args.bios],
                 abis=args.abi or ["arm64-v8a"],

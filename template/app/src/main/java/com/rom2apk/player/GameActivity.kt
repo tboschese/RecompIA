@@ -119,7 +119,11 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
 
         lifecycleScope.launch {
             val gameFile = try {
-                withContext(Dispatchers.IO) { extractGameFiles() }
+                withContext(Dispatchers.IO) {
+                    extractGameFiles { done, total ->
+                        loading.post { loading.text = "Preparando ${config.title}… ${done * 100 / total}%" }
+                    }
+                }
             } catch (e: Exception) {
                 showFatalError("Não foi possível preparar o jogo: ${e.message}")
                 return@launch
@@ -129,13 +133,16 @@ class GameActivity : AppCompatActivity(), VirtualPadView.Listener, InputManager.
         }
     }
 
-    private fun extractGameFiles(): File {
+    private fun extractGameFiles(onProgress: (done: Int, total: Int) -> Unit): File {
         val gameDir = File(filesDir, "game")
         val marker = File(gameDir, ".version")
         if (!marker.exists() || marker.readText() != config.version) {
             gameDir.deleteRecursively()
             gameDir.mkdirs()
-            config.files.forEach { name -> copyAsset("game/$name", File(gameDir, name)) }
+            config.files.forEachIndexed { index, name ->
+                copyAsset("game/$name", File(gameDir, name))
+                onProgress(index + 1, config.files.size)
+            }
             marker.writeText(config.version)
         }
 

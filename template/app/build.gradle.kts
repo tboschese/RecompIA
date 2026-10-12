@@ -57,6 +57,11 @@ android {
         jniLibs { useLegacyPackaging = true }
     }
 
+    // MSU-1 audio barely compresses; storing it as-is keeps builds and first-launch extraction fast.
+    androidResources {
+        noCompress += listOf("pcm", "msu")
+    }
+
     lint {
         checkReleaseBuilds = false
     }

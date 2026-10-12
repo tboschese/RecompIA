@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import re
 import shutil
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import patches
 from .consoles import Console, DetectionError, detect_console, supported_extensions
 
 _CUE_FILE_LINE = re.compile(r'^(\s*FILE\s+)(?:"([^"]+)"|(\S+))(\s+\S+\s*)$', re.IGNORECASE)
@@ -45,7 +47,12 @@ def slugify(text: str) -> str:
     return slug[:40]
 
 
-def prepare(rom: Path, forced_console: Optional[str], title: Optional[str]) -> PreparedGame:
+def prepare(
+    rom: Path,
+    forced_console: Optional[str],
+    title: Optional[str],
+    patch: Optional[Path] = None,
+) -> PreparedGame:
     tempdir = tempfile.TemporaryDirectory(prefix="rom2apk-")
     work = Path(tempdir.name)
     source = rom
@@ -62,10 +69,46 @@ def prepare(rom: Path, forced_console: Optional[str], title: Optional[str]) -> P
         game.files = _prepare_cue(source, work / "game.cue")
     else:
         game.main = "game" + ext
-        game.files = {game.main: source}
+        rom_file = source
+        if patch is not None:
+            rom_file = work / ("patched" + ext)
+            rom_file.write_bytes(patches.apply(source.read_bytes(), patch))
+        game.files = {game.main: rom_file}
+        if console.id == "snes":
+            game.files.update(_msu1_files(source, work))
 
     game.version = _fingerprint(game)
     return game
+
+
+def _msu1_files(rom: Path, work: Path) -> Dict[str, Path]:
+    """MSU-1 data and audio tracks next to the ROM, renamed to match `game.sfc`.
+
+    Packs are named after the ROM (`Game.msu`, `Game-1.pcm`…); when the names don't match
+    and there is a single MSU-1 pack in the folder, that one is used.
+    """
+    folder = rom.parent
+    stem = rom.stem
+    if not (folder / f"{stem}.msu").exists() and not list(folder.glob(f"{glob.escape(stem)}-*.pcm")):
+        packs = {p.stem for p in folder.glob("*.msu")}
+        if len(packs) != 1:
+            return {}
+        stem = packs.pop()
+
+    files: Dict[str, Path] = {}
+    for track in folder.glob(f"{glob.escape(stem)}-*.pcm"):
+        number = track.stem[len(stem) + 1:]
+        if number.isdigit():
+            files[f"game-{int(number)}.pcm"] = track
+    data = folder / f"{stem}.msu"
+    if data.exists():
+        files["game.msu"] = data
+    elif files:
+        # snes9x only enables MSU-1 when the data file exists; most packs ship it empty anyway.
+        empty = work / "game.msu"
+        empty.touch()
+        files["game.msu"] = empty
+    return files
 
 
 def _extract_zip(archive: Path, target: Path) -> Path:

@@ -60,6 +60,7 @@ python3 -m rom2apk build Jogo.sfc --video crt-arcade --aspect 8:7
 | `--scale 1-4` | resolução interna para PS1 (até 2x) e N64 (até 4x) |
 | `--console` | força o console quando a extensão é ambígua |
 | `--name`, `--icon`, `--package` | nome, ícone e identificador do app (só com uma ROM) |
+| `--patch arquivo.ips\|.bps` | aplica um patch na ROM (traduções, hacks MSU-1, correções) |
 | `--no-auto-icon` | usa o ícone padrão em vez de criar um com a tela do jogo |
 | `--bios` | inclui um arquivo de BIOS (opcional para PS1) |
 | `--abi` | arquitetura alvo; padrão `arm64-v8a` (repita para incluir `armeabi-v7a` em aparelhos antigos) |
@@ -67,6 +68,16 @@ python3 -m rom2apk build Jogo.sfc --video crt-arcade --aspect 8:7
 | `--keystore …` | assina com a sua própria chave em vez da chave gerada automaticamente |
 
 `python3 -m rom2apk consoles` lista os consoles e `python3 -m rom2apk build --help` mostra todas as opções.
+
+### Trilha sonora MSU-1 (SNES)
+
+Hacks MSU-1 trocam a música do jogo por faixas em qualidade de CD (há versões orquestradas de vários clássicos). Coloque o pacote na mesma pasta da ROM — `Jogo.msu` e `Jogo-1.pcm`, `Jogo-2.pcm`… — e, se o hack vier como patch, passe-o com `--patch`:
+
+```bash
+python3 -m rom2apk build "Chrono Trigger (USA).sfc" --patch chrono_msu1.bps
+```
+
+O rom2apk inclui as faixas no APK e liga o áudio de 44,1 kHz do snes9x. Os pacotes costumam ter de 300 MB a 1 GB, e o celular precisa do dobro de espaço livre na primeira abertura (o APK e as faixas extraídas).
 
 ### Filtros de imagem
 
