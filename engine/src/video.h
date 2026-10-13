@@ -34,9 +34,8 @@ const char *video_profile_name(void);
 /* Saves the next frame drawn, as it appears on screen, to a binary PPM (automated visual checks). */
 void video_capture_next(const char *path);
 /* A Mac display in a "scaled" mode draws everything larger and shrinks it, smoothing every pixel.
- * While the game covers it, the display at (x, y) in desktop points runs at its panel's own pixels;
- * video_restore_display() goes back (macOS also goes back by itself when the app quits). */
+ * While the game runs, in a window or fullscreen, the display at (x, y) in desktop points runs at
+ * its panel's own pixels; macOS goes back by itself when the app quits. */
 void video_native_display(int x, int y);
-void video_restore_display(void);
 
 #endif

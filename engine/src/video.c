@@ -509,7 +509,6 @@ const char *video_profile_name(void)
 
 #ifdef __APPLE__
 static CGDirectDisplayID changed_display;
-static CGDisplayModeRef mode_before;
 
 static void set_display_mode(CGDirectDisplayID display, CGDisplayModeRef mode)
 {
@@ -568,29 +567,13 @@ void video_native_display(int x, int y)
 	if (best) {
 		set_display_mode(display, best);
 		changed_display = display;
-		mode_before = now;
-	} else {
-		CGDisplayModeRelease(now);
 	}
+	CGDisplayModeRelease(now);
 	CFRelease(modes);
-}
-
-void video_restore_display(void)
-{
-	if (!changed_display)
-		return;
-	set_display_mode(changed_display, mode_before);
-	CGDisplayModeRelease(mode_before);
-	changed_display = 0;
-	mode_before = NULL;
 }
 #else
 void video_native_display(int x, int y)
 {
 	(void)x, (void)y;
-}
-
-void video_restore_display(void)
-{
 }
 #endif

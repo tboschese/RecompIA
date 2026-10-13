@@ -628,8 +628,6 @@ static void toggle_fullscreen(void)
 		video_native_display(x + w / 2, y + h / 2);
 	}
 	SDL_SetWindowFullscreen(window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-	if (full)
-		video_restore_display();
 	SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
 }
 
