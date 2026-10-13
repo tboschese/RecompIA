@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
 
 #define WIDTH 256
 #define MAX_HEIGHT 240
@@ -14,6 +17,35 @@ static uint32_t image[MAX_HEIGHT * REMASTER_SCALE_MAX * WIDTH * REMASTER_SCALE_M
 static uint8_t shadowed[MAX_HEIGHT * REMASTER_SCALE_MAX * WIDTH * REMASTER_SCALE_MAX];
 static int scale = REMASTER_SCALE;
 #define SCALE scale
+
+/* Runs `rows(context, y0, y1)` over 0..height in bands on every core. Only for work whose
+ * console row writes its own screen rows and reads nothing another band writes. */
+typedef void RowsFn(void *context, int y0, int y1);
+#define BANDS 8
+typedef struct {
+	RowsFn *rows;
+	void *context;
+	int height;
+} Bands;
+
+static void band(void *bands, size_t i)
+{
+	const Bands *b = bands;
+	int y0 = (int)((size_t)b->height * i / BANDS), y1 = (int)((size_t)b->height * (i + 1) / BANDS);
+	if (y0 < y1)
+		b->rows(b->context, y0, y1);
+}
+
+static void in_bands(int height, RowsFn *rows, void *context)
+{
+	Bands b = { rows, context, height };
+#ifdef __APPLE__
+	dispatch_apply_f(BANDS, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &b, band);
+#else
+	for (size_t i = 0; i < BANDS; i++)
+		band(&b, i);
+#endif
+}
 /* The neighbor's shaded color, sampled before any stair. A later stair must not
  * copy a corner a previous stair already replaced. */
 static uint32_t stair_color[MAX_HEIGHT][WIDTH];
@@ -956,11 +988,17 @@ static void paint_color(unsigned out_w, unsigned out_h, int x, int y, uint32_t c
 	}
 }
 
-static void bevel(unsigned out_w, unsigned out_h)
+typedef struct {
+	unsigned out_w, out_h;
+	int height;
+} Canvas;
+
+static void bevel_rows(void *context, int y0, int y1)
 {
-	prepare_grid();
-	int height = (int)src_height;
-	for (int y = 0; y < height; y++) {
+	const Canvas *canvas = context;
+	unsigned out_w = canvas->out_w, out_h = canvas->out_h;
+	int height = canvas->height;
+	for (int y = y0; y < y1; y++) {
 		for (int x = 0; x < WIDTH; x++) {
 			uint32_t here = grid[y][x];
 			if (sprite_pixel(x, y)) {
@@ -1034,6 +1072,13 @@ static void bevel(unsigned out_w, unsigned out_h)
 				paint_color(out_w, out_h, x, y, shade(here, half > 0 && from_bottom < half ? 62 : 72), 0, SCALE);
 		}
 	}
+}
+
+static void bevel(unsigned out_w, unsigned out_h)
+{
+	prepare_grid();
+	Canvas canvas = { out_w, out_h, (int)src_height };
+	in_bands(canvas.height, bevel_rows, &canvas);
 }
 
 /* Dynamic light. The game already marks what glows: a flame drawn in the
@@ -1313,6 +1358,8 @@ static unsigned light_hash(unsigned v)
 	v ^= v >> 16;
 	return v;
 }
+
+static void apply_rows(void *context, int y0, int y1);
 
 static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 {
@@ -1777,7 +1824,14 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 		}
 	}
 
-	for (int y = 0; y < h; y++) {
+	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
+	in_bands(h, apply_rows, &canvas);
+}
+
+static void apply_rows(void *context, int y0, int y1)
+{
+	unsigned out_w = ((const Canvas *)context)->out_w;
+	for (int y = y0; y < y1; y++) {
 		for (int x = 0; x < WIDTH; x++) {
 			int gr = gain[y][x][0], gg = gain[y][x][1], gb = gain[y][x][2];
 			int ar = glow[y][x][0], ag = glow[y][x][1], ab = glow[y][x][2];
@@ -1810,6 +1864,20 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 	}
 }
 
+static void fill_rows(void *context, int y0, int y1)
+{
+	unsigned out_w = ((const Canvas *)context)->out_w;
+	for (int y = y0; y < y1; y++) {
+		for (int x = 0; x < WIDTH; x++) {
+			uint32_t color = at_xy(x, y);
+			uint32_t *dst = &image[((size_t)y * SCALE) * out_w + (size_t)x * SCALE];
+			for (int j = 0; j < SCALE; j++)
+				for (int i = 0; i < SCALE; i++)
+					dst[(size_t)j * out_w + (unsigned)i] = color;
+		}
+	}
+}
+
 const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height, const CoreMotion *m,
 	unsigned *width, unsigned *out_height)
 {
@@ -1831,15 +1899,8 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_w = WIDTH * SCALE;
 	unsigned out_h = height * SCALE;
 
-	for (unsigned y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH; x++) {
-			uint32_t color = at_xy(x, (int)y);
-			uint32_t *dst = &image[((size_t)y * SCALE) * out_w + (size_t)x * SCALE];
-			for (int j = 0; j < SCALE; j++)
-				for (int i = 0; i < SCALE; i++)
-					dst[(size_t)j * out_w + (unsigned)i] = color;
-		}
-	}
+	Canvas canvas = { out_w, out_h, (int)height };
+	in_bands((int)height, fill_rows, &canvas);
 
 	bevel(out_w, out_h);
 	stairs(out_w);
