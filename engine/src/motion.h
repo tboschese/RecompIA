@@ -35,11 +35,17 @@ typedef struct {
  * comes from the console's own state, so there is no blur and no warping artifacts. */
 void motion_init(const CoreMotion *(*source)(void));
 bool motion_available(void);
-/* Call with every frame the core outputs (XRGB8888), and its HD art version at 4x when there is
- * one (hdpack.c), which the in-between frame then moves block by block. */
-void motion_capture(const void *pixels, unsigned width, unsigned height, size_t pitch, const uint32_t *hd);
-/* The halfway frame between the last two captured frames, at twice the resolution (4x with HD
- * art), or NULL when they can't be interpolated (scene cut, HD mode 7, other frame sizes). */
+/* Drops captured frames. Used after a hidden warmup so the first picture on screen
+ * is not blended with frames the player never saw. */
+void motion_reset(void);
+/* Call with every frame the core outputs (XRGB8888), and its remastered frame at REMASTER_SCALE
+ * (remaster.c) when there is one. The in-between frame moves that art block by block, so 120 Hz
+ * does not fall back to the console pixels. */
+void motion_capture(const void *pixels, unsigned width, unsigned height, size_t pitch, const uint32_t *hd,
+	unsigned hd_scale);
+/* The halfway frame between the last two captured frames, at twice the resolution (or at the
+ * remaster's own scale), or NULL when they can't be interpolated (scene cut, HD mode 7, other
+ * frame sizes). */
 const uint32_t *motion_between(unsigned *width, unsigned *height);
 /* The last captured frame (its HD version when there is one), to show after the halfway one. */
 const uint32_t *motion_current(unsigned *width, unsigned *height);

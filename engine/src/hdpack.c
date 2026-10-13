@@ -118,42 +118,171 @@ static uint64_t pixel_key(const CoreMotion *m, int row, int x)
 	return key ? key : 1;
 }
 
-/* ---- the pack ---- */
+static int key_row = -1;
 
-static Table pack;
-static uint32_t *images;
+void hdpack_keys_begin(void)
+{
+	render_stamp++;
+	key_row = -1;
+}
+
+uint64_t hdpack_key(const CoreMotion *m, int row, int x)
+{
+	if (row != key_row) {
+		if (key_row < 0 || memcmp(m->cgram[row], m->cgram[key_row], sizeof m->cgram[0]))
+			start_row();
+		key_row = row;
+	}
+	return pixel_key(m, row, x);
+}
+
+/* ---- the packs, one per style ---- */
+
+#define MAX_STYLES 8
+#define STYLE_ID 24
+#define STYLE_NAME 40
+
+typedef struct {
+	char id[STYLE_ID];
+	char name[STYLE_NAME];
+	bool bloom;
+	Table table;
+	uint32_t *images;
+} Style;
+
+static Style styles[MAX_STYLES];
+static int style_count, style_at = -1;
 static uint32_t out[MAX_HEIGHT * HDPACK_SCALE * WIDTH * HDPACK_SCALE];
 
 bool hdpack_load(const char *path)
 {
+	if (style_count >= MAX_STYLES)
+		return false;
 	FILE *f = fopen(path, "rb");
 	if (!f)
 		return false;
-	char magic[8];
-	uint32_t scale, count;
-	bool ok = fread(magic, 8, 1, f) == 1 && !memcmp(magic, "RMXHD1\0\0", 8) && fread(&scale, 4, 1, f) == 1
-		&& scale == HDPACK_SCALE && fread(&count, 4, 1, f) == 1 && count > 0;
+	char magic[8], id[STYLE_ID], name[STYLE_NAME];
+	uint32_t scale, flags = 0, count;
+	bool ok = fread(magic, 8, 1, f) == 1 && fread(&scale, 4, 1, f) == 1 && scale == HDPACK_SCALE;
+	if (ok && !memcmp(magic, "RMXHD2\0\0", 8)) {
+		ok = fread(&flags, 4, 1, f) == 1 && fread(id, STYLE_ID, 1, f) == 1 && fread(name, STYLE_NAME, 1, f) == 1
+			&& fread(&count, 4, 1, f) == 1 && count > 0;
+		id[STYLE_ID - 1] = 0, name[STYLE_NAME - 1] = 0;
+	} else if (ok && !memcmp(magic, "RMXHD1\0\0", 8)) {
+		ok = fread(&count, 4, 1, f) == 1 && count > 0;
+		snprintf(id, sizeof id, "remaster");
+		snprintf(name, sizeof name, "remaster fiel");
+	} else {
+		ok = false;
+	}
+	Style *s = &styles[style_count];
 	if (ok) {
-		images = malloc((size_t)count * TILE * TILE * sizeof(uint32_t));
+		s->images = malloc((size_t)count * TILE * TILE * sizeof(uint32_t));
 		for (uint32_t i = 0; ok && i < count; i++) {
 			uint64_t key;
-			ok = images && fread(&key, 8, 1, f) == 1 && fread(images + (size_t)i * TILE * TILE, sizeof(uint32_t) * TILE * TILE, 1, f) == 1;
+			ok = s->images && fread(&key, 8, 1, f) == 1 && fread(s->images + (size_t)i * TILE * TILE, sizeof(uint32_t) * TILE * TILE, 1, f) == 1;
 			if (ok)
-				*table_insert(&pack, key) = i;
+				*table_insert(&s->table, key) = i;
 		}
 	}
 	fclose(f);
 	if (!ok) {
-		free(images), images = NULL;
-		free(pack.entries), memset(&pack, 0, sizeof pack);
+		free(s->images);
+		free(s->table.entries);
+		memset(s, 0, sizeof *s);
 		fprintf(stderr, "pacote de arte HD inválido: %s\n", path);
+		return false;
 	}
-	return ok;
+	snprintf(s->id, sizeof s->id, "%s", id);
+	snprintf(s->name, sizeof s->name, "%s", name);
+	s->bloom = flags & 1;
+	if (style_at < 0)
+		style_at = style_count;
+	style_count++;
+	return true;
 }
 
 bool hdpack_loaded(void)
 {
-	return images != NULL;
+	return style_count > 0;
+}
+
+void hdpack_next(void)
+{
+	if (!style_count)
+		return;
+	style_at++;
+	if (style_at >= style_count)
+		style_at = -1;
+}
+
+void hdpack_use(const char *id)
+{
+	if (!id || !strcmp(id, "original")) {
+		style_at = -1;
+		return;
+	}
+	for (int i = 0; i < style_count; i++)
+		if (!strcmp(styles[i].id, id) || !strcmp(styles[i].name, id)) {
+			style_at = i;
+			return;
+		}
+}
+
+const char *hdpack_style_name(void)
+{
+	if (!style_count)
+		return "sem pacote HD";
+	return style_at < 0 ? "original" : styles[style_at].name;
+}
+
+/* Adds light around the bright pixels without blending the picture itself: the glow is summed
+ * onto the frame, and every sample stays on the pixel grid. */
+static void add_bloom(uint32_t *px, unsigned w, unsigned h)
+{
+	unsigned n = w * h;
+	static float *buf;
+	static unsigned cap;
+	if (cap < n * 6) {
+		free(buf);
+		buf = malloc(n * 6 * sizeof(float));
+		cap = n * 6;
+	}
+	float *bright = buf, *blur = buf + n * 3;
+	for (unsigned i = 0; i < n; i++) {
+		float r = (px[i] >> 16 & 255), g = (px[i] >> 8 & 255), b = (px[i] & 255);
+		float luma = 0.30f * r + 0.59f * g + 0.11f * b;
+		float k = luma > 160 ? (luma - 160) / 95.f : 0;
+		if (k > 1)
+			k = 1;
+		bright[3 * i] = r * k, bright[3 * i + 1] = g * k, bright[3 * i + 2] = b * k;
+	}
+	int rad = 4;
+	for (int pass = 0; pass < 2; pass++) {
+		for (unsigned y = 0; y < h; y++)
+			for (unsigned x = 0; x < w; x++) {
+				float s0 = 0, s1 = 0, s2 = 0;
+				int count = 0;
+				for (int d = -rad; d <= rad; d++) {
+					int xx = pass ? (int)x : (int)x + d, yy = pass ? (int)y + d : (int)y;
+					if (xx < 0 || yy < 0 || xx >= (int)w || yy >= (int)h)
+						continue;
+					unsigned at = ((unsigned)yy * w + (unsigned)xx) * 3;
+					s0 += bright[at], s1 += bright[at + 1], s2 += bright[at + 2];
+					count++;
+				}
+				unsigned to = (y * w + x) * 3;
+				blur[to] = s0 / count, blur[to + 1] = s1 / count, blur[to + 2] = s2 / count;
+			}
+		float *swap = bright;
+		bright = blur, blur = swap;
+	}
+	for (unsigned i = 0; i < n; i++) {
+		int r = (int)((px[i] >> 16 & 255) + bright[3 * i] * 0.55f);
+		int g = (int)((px[i] >> 8 & 255) + bright[3 * i + 1] * 0.55f);
+		int b = (int)((px[i] & 255) + bright[3 * i + 2] * 0.55f);
+		px[i] = (uint32_t)(r > 255 ? 255 : r) << 16 | (uint32_t)(g > 255 ? 255 : g) << 8 | (uint32_t)(b > 255 ? 255 : b);
+	}
 }
 
 static uint32_t channel_mix(uint32_t final, uint32_t art, uint32_t own, unsigned brightness, int shift)
@@ -166,7 +295,8 @@ static uint32_t channel_mix(uint32_t final, uint32_t art, uint32_t own, unsigned
 const uint32_t *hdpack_render(const void *pixels, size_t pitch, unsigned height, const CoreMotion *m,
 	unsigned *width, unsigned *out_height)
 {
-	if (!images || height > MAX_HEIGHT)
+	Style *style = style_at >= 0 && style_at < style_count ? &styles[style_at] : NULL;
+	if (!style || !style->images || height > MAX_HEIGHT)
 		return NULL;
 	render_stamp++;
 	unsigned out_w = WIDTH * HDPACK_SCALE, replaced = 0;
@@ -178,7 +308,7 @@ const uint32_t *hdpack_render(const void *pixels, size_t pitch, unsigned height,
 		for (unsigned x = 0; x < WIDTH; x++) {
 			uint32_t final = line[x] & 0xffffff;
 			uint32_t *block = out + (size_t)y * HDPACK_SCALE * out_w + x * HDPACK_SCALE;
-			uint64_t key = pixel_key(m, row, (int)x), *index = key ? table_find(&pack, key) : NULL;
+			uint64_t key = pixel_key(m, row, (int)x), *index = key ? table_find(&style->table, key) : NULL;
 			if (!index) {
 				for (int j = 0; j < HDPACK_SCALE; j++)
 					for (int i = 0; i < HDPACK_SCALE; i++)
@@ -186,7 +316,7 @@ const uint32_t *hdpack_render(const void *pixels, size_t pitch, unsigned height,
 				continue;
 			}
 			replaced++;
-			const uint32_t *art = images + *index * TILE * TILE;
+			const uint32_t *art = style->images + *index * TILE * TILE;
 			uint8_t texel = m->texel[row][x];
 			int tx = (texel & 7) * HDPACK_SCALE, ty = (texel >> 3 & 7) * HDPACK_SCALE;
 			bool hflip = texel & 0x40, vflip = texel & 0x80;
@@ -202,6 +332,8 @@ const uint32_t *hdpack_render(const void *pixels, size_t pitch, unsigned height,
 	}
 	if (!replaced)
 		return NULL;
+	if (style->bloom)
+		add_bloom(out, out_w, height * HDPACK_SCALE);
 	*width = out_w;
 	*out_height = height * HDPACK_SCALE;
 	return out;
@@ -289,8 +421,11 @@ void hdpack_capture(const void *pixels, size_t pitch, unsigned height, const Cor
 		for (unsigned x = 0; x < WIDTH; x++) {
 			size_t at = (size_t)y * WIDTH + x;
 			uint64_t key = bright && (line[x] & 0xffffff) == (m->color[row][x] & 0xffffff) ? pixel_key(m, row, (int)x) : 0;
-			if (key && table_find(&pack, key))
-				key = 0;  /* already redrawn */
+			for (int s = 0; key && s < style_count; s++)
+				if (table_find(&styles[s].table, key)) {
+					key = 0;  /* already redrawn in a style */
+					break;
+				}
 			frame_keys[at] = key;
 			frame_texels[at] = m->texel[row][x];
 			uint64_t *seen = key ? table_find(&coverage, key) : NULL;

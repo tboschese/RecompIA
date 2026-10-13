@@ -4,9 +4,10 @@
  "app": {
   "title": "Chrono Trigger",
   "id": "chrono-trigger",
-  "version": "0.6.0",
+  "version": "0.10.0",
+  "remaster": true,
+  "lights": "lights.txt",
   "icon_seconds": 30,
-  "art_capture": true,
   "core": "bsnes-hd",
   "video": "pixel",
   "options": {

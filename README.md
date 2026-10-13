@@ -1,86 +1,81 @@
 # RemasterIA
 
-Versões refeitas de jogos clássicos para telas modernas, com qualidade acima de um emulador. O código original é analisado e recompilado para código nativo, e a partir daí o jogo ganha:
-- **pixel perfect** em qualquer tela;
-- **movimento fluido a 90/120 Hz**, interpolando sprites e câmera entre os quadros do jogo;
-- **profundidade**: camadas com paralaxe e iluminação.
-
-Os jogos saem primeiro para **macOS**, para testar rápido, e depois para **Android**.
-
-O repositório guarda **só código e anotações**. ROMs e tudo que é extraído delas ficam fora do Git: cada projeto lê a sua própria cópia do jogo na hora de compilar.
-
-## Estrutura
-
-```
-games/<jogo>/      um projeto por jogo: versão esperada da ROM, opções do app, pontos de entrada, nomes de rotinas
-engine/            o motor (C + SDL2 + OpenGL) que roda os jogos: macOS hoje, Android depois
-engine/shaders/    visuais: pixel perfect (padrão) e CRT
-tools/remasteria/    gera os aplicativos (macOS: .app)
-tools/snesre/      engenharia reversa de SNES (desmontador 65816, rastreamento de execução)
-tools/rom2apk/     o caminho rápido: empacota uma ROM com emulador em um APK
-build/, dist/      saída das análises e aplicativos gerados (ignorados pelo Git)
-```
-
-## Jogar no Mac
+Software that redraws a classic game for a modern screen. A game is a folder in `games/<game>`: the expected ROM, the core, the options, and whether the picture remaster is on. The command builds the app, and the engine redraws the picture while the game runs.
 
 ```bash
-brew install sdl2   # uma vez
+brew install sdl2   # once
+PYTHONPATH=tools/remasteria python3 -m remasteria mac games/<game> path/to/the/rom
+```
+
+What the engine adds, for every game that turns the remaster on:
+- **hard pixels on a fine grid**, on top of the original art, with no blending and no blur;
+- **90/120 Hz motion** from the real scroll and sprites;
+- **depth**: farther layers a step darker, light and shadow on sprites, without moving what the game drew.
+
+Games ship on **macOS** first, then **Android**. For another game, the new folder names the core and sets `"remaster": true`. The same engine and the same command apply.
+
+The repository holds **only code and notes**. ROMs and anything extracted from them stay out of Git: each project reads its own copy of the game at build time.
+
+## Layout
+
+```
+games/<game>/      one project per game: expected ROM version, app options, entry points, routine names
+engine/            the engine (C + SDL2 + OpenGL) that runs the games: macOS today, Android later
+engine/shaders/    looks: pixel perfect (default) and CRT
+tools/remasteria/  the command that builds the remaster (macOS: .app) from games/<game> and the ROM
+tools/snesre/      SNES reverse engineering (65816 disassembler, execution tracing)
+tools/rom2apk/     the fast path: pack a ROM with an emulator into an APK
+build/, dist/      analysis output and generated apps (gitignored)
+```
+
+## Play on Mac
+
+```bash
 PYTHONPATH=tools/remasteria python3 -m remasteria mac games/chrono-trigger "Chrono Trigger (USA).sfc"
 open "dist/Chrono Trigger.app"
 ```
 
-O app é independente: leva dentro dele o motor, o núcleo, o SDL, a base de controles e a sua ROM. Ele continua de onde você parou e guarda os saves e os controles em `~/Library/Application Support/RemasterIA/<jogo>/`. O núcleo e o motor são compilados do código-fonte na primeira vez e ficam guardados em `~/.snesre`.
+The app is self-contained: it carries the engine, the core, SDL, the controller database, and your ROM. It opens filling the screen, at the console's aspect, with bars on the sides of a wide monitor. F11 returns to a window. It resumes where you left off and keeps saves and controller mappings in `~/Library/Application Support/RemasterIA/<game>/`. The core and the engine are compiled from source the first time and cached in `~/.snesre`.
 
-**Qualidade — Chrono Trigger 0.6:**
-- **Arte remasterizada com IA, tile por tile:** cada tile do cenário e cada pedaço de sprite é redesenhado em 4x e trocado em tempo real pelo motor. O núcleo informa, para cada pixel da tela, de qual tile, de qual paleta e de qual ponto do tile ele veio. Com isso, a arte nova acompanha exatamente a rolagem, as animações, os espelhamentos, as trocas de paleta, os fades e as transparências do jogo, sem tremer de um quadro para o outro como um filtro de tela. A IA ([Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN), modelo para anime, rodando na GPU do Mac) redesenha a cena inteira, para ter contexto, e cada tile recebe a média de todas as cenas em que apareceu. Dá para voltar à arte original no menu. Hoje o pacote cobre a abertura do jogo; o resto vem jogando (veja abaixo).
-- **Pixel perfect:** cada pixel do jogo vira um bloco exato de pixels da tela, sempre na maior escala inteira que cabe na janela, sem nenhuma suavização.
-- **Mode 7 em HD:** renderização nativa 4x com correção de perspectiva (bsnes-hd), ligada só nas cenas em Mode 7.
-- **Sem limite de sprites:** nada pisca.
-- **120 quadros por segundo de verdade (telas de 120 Hz, como o ProMotion):** entre dois quadros do jogo, o motor desenha um quadro intermediário em que cada camada e cada sprite está na metade do seu movimento real. O movimento vem do próprio estado do console: a rolagem de cada camada em cada linha e a posição de cada sprite. Não é adivinhado como na "suavização de movimento" das TVs, então não há borrão nem deformação. A câmera e os personagens deslizam com o dobro de fluidez do original. Um emulador não consegue fazer isso, porque só vê a imagem pronta. Ainda não vale nas cenas em Mode 7. Dá para trocar para o movimento original no menu.
-- **Sem engasgos:** o jogo é travado na taxa da tela com vsync, sem cortes na imagem. O áudio se ajusta em até 0,5% para acompanhar, sem estalos.
-- **Áudio com interpolação cúbica:** mais agudos que o som abafado do console.
+**Quality — Chrono Trigger 0.10, the first game with `remaster` on:**
+- **Hard-pixel remaster:** the console picture is redrawn on the largest integer grid that fits the screen, so the picture fills the display and every console pixel is the same size. Flat areas keep the original color. Light is one flat step of that same color, not a new one and not a mix with the neighbor: the inside of a body's top third is a little lighter, the inside of the bottom third a little darker. Black stays black, so a dark area does not turn beige. The middle stays the color the game drew. The outline stays that color too, so the light does not trace the stair. A one-pixel stroke, such as a letter, and stipple, such as a cloud, stay as drawn. The ground shadow is cool and sits on the feet. A farther layer steps darker and cooler. Nothing is shifted, so gameplay stays where the game put it. Neighbors are never mixed, and nothing is blurred.
+- **Pixel perfect:** each pixel of that grid becomes an exact block of screen pixels, at the largest integer scale where every block is the same size, with no smoothing.
+- **HD Mode 7:** native 4x rendering with perspective correction (bsnes-hd), used only in Mode 7 scenes. Those scenes skip the remaster above.
+- **No sprite limit:** nothing flickers.
+- **True 120 frames per second (120 Hz displays, such as ProMotion):** between two game frames, the engine draws one frame where every layer and every sprite is halfway along its real motion, already in the remastered art. The motion comes from the console's own state: each layer's scroll on each line, and each sprite's position. It is not guessed the way a TV's "motion smoothing" is, so there is no blur and no warp. The camera and the characters slide at twice the original fluidity. An emulator cannot do this, because it only sees the finished picture. It does not apply to Mode 7 scenes yet. The menu can switch back to the original motion.
+- **No stutter:** the game is locked to the display rate with vsync, with no tearing. Audio is resampled by up to 0.5% to keep up, without clicks.
+- **Cubic audio interpolation:** more highs than the console's muffled sound.
 
-**Todo jogo já nasce com:**
-- **Controles USB e Bluetooth nativos:** é só conectar, inclusive com o jogo aberto. Os controles conhecidos (a base do SDL mais a [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB), com milhares de modelos) já entram no layout do SNES. Qualquer outro funciona depois de mapeado no menu. O segundo controle é o jogador 2.
-- **Teclado** com todas as teclas remapeáveis.
-- **Menu de pausa** (Esc, botão Home do controle ou Select+Start) com: continuar, salvar estado, carregar estado, controles, visual (pixel perfect ou CRT), arte (remasterizada ou original), movimento (suave ou original), tela cheia e sair.
-- **8 slots de save state**, cada um com uma miniatura da cena, data e hora. Além disso, o jogo salva sozinho ao fechar e continua dali ao abrir.
+**Every game already has:**
+- **Native USB and Bluetooth controllers:** plug one in, including while the game is open. Known controllers (SDL's list plus [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB), thousands of models) already map to the SNES layout. Any other works after it is mapped in the menu. The second controller is player 2.
+- **Keyboard** with every key remappable.
+- **Pause menu** (Esc, the controller Home button, or Select+Start) with: resume, save state, load state, controls, look (pixel perfect or CRT), motion (smooth or original), fullscreen, and quit.
+- **8 save-state slots**, each with a thumbnail, date, and time. The game also saves itself on quit and continues from there on the next launch.
 
-Teclado padrão: setas, Z/X/A/S = B/A/Y/X, Q/W = L/R, Enter = Start, Shift direito = Select. Atalhos: Esc = menu, Tab (segurar) = acelerar, F2 = visual, F5/F7 = salvar/carregar no slot atual, F11 ou Cmd+F = tela cheia.
+Default keyboard: arrows, Z/X/A/S = B/A/Y/X, Q/W = L/R, Enter = Start, Right Shift = Select. Shortcuts: Esc = menu, hold Tab = fast forward, F2 = look, F5/F7 = save/load the current slot, F11 or Cmd+F = fullscreen.
 
-### Remasterizar a arte jogando
+## Current project: Chrono Trigger (USA)
 
-Enquanto você joga, o app guarda as cenas que mostram tiles que ainda não foram redesenhados, em `~/Library/Application Support/RemasterIA/<jogo>/arte/`. Ele só guarda as cenas com brilho total e sem transparência por cima, para a IA ver a arte limpa, e só quando a cena tem tiles novos. Depois, gere o pacote e o app de novo:
+1. **Code discovery** — disassembly from the CPU vectors, following calls and branches while tracking the M/X flags. *(done)*
+2. **Full coverage** — jump tables, code in RAM, and execution logs (from our engine, or a Mesen 2 CDL), plus hand notes in `game.json`. *(in progress: still need to play through and decompress the code the game unpacks into RAM)*
+3. **Recompiler** — each 65816 function becomes a C function. The game runs natively and is compared frame by frame with an emulator, so it behaves the same.
+4. **Our own renderer** — the engine draws the scene from the game's graphics state (tiles, sprites, scroll, and palette), not from the console's finished picture. That is what makes it possible to:
+   - interpolate positions to 90/120 Hz *(first version done: 120 Hz in-between frames from the layers and sprites the core exports; Mode 7 still missing)*;
+   - draw the scene at a higher resolution, in hard pixels, on top of the original art *(Chrono Trigger 0.10: the largest integer grid that fits the screen, a lighter and a darker step of the same color inside the form, outline left as drawn, farther layers darker; recompiling the game itself is still item 3)*;
+   - separate layers for depth. Parallax stays the game's: moving each layer's camera would change where the character stands.
+5. **Platforms** — macOS *(done: pixel-perfect app with HD Mode 7 and vsync)*; Android with SDL2 + NDK, on-screen controls, and Bluetooth (the ones from rom2apk).
 
-```bash
-PYTHONPATH=tools/remasteria python3 -m remasteria hdpack games/chrono-trigger   # IA: cerca de 0,4 s por cena
-PYTHONPATH=tools/remasteria python3 -m remasteria mac games/chrono-trigger "Chrono Trigger (USA).sfc"
-```
-
-O pacote fica em `build/chrono-trigger/hdpack.bin`, fora do Git, porque é feito a partir da ROM. Precisa de `pip3 install --user numpy`; o Real-ESRGAN é baixado sozinho na primeira vez.
-
-## Projeto atual: Chrono Trigger (USA)
-
-1. **Descoberta do código** — desmontagem a partir dos vetores da CPU, seguindo chamadas e desvios com rastreamento das flags M/X. *(feito)*
-2. **Cobertura completa** — tabelas de salto, código na RAM e registros de execução (do nosso motor ou CDL do Mesen 2), mais anotações manuais em `game.json`. *(em andamento: falta jogar e descomprimir o código que o jogo descompacta na RAM)*
-3. **Recompilador** — cada função 65816 vira uma função C. O jogo roda nativamente e é comparado quadro a quadro com um emulador, para garantir que se comporta igual.
-4. **Renderizador próprio** — o motor desenha a cena a partir do estado gráfico do jogo (tiles, sprites, rolagem e paleta), não da imagem pronta do console. É isso que permite:
-   - interpolar posições para 90/120 Hz *(primeira versão feita: quadros intermediários a 120 Hz a partir das camadas e sprites que o núcleo exporta; falta o Mode 7)*;
-   - trocar a arte por versões em alta resolução *(primeira versão feita: pacote HD redesenhado por IA, tile por tile; falta cobrir o jogo inteiro e tratar as bordas dos sprites)*;
-   - separar camadas para profundidade e paralaxe.
-5. **Plataformas** — macOS *(feito: app pixel perfect com HD Mode 7 e vsync)*; Android com SDL2 + NDK, controles na tela e Bluetooth (os do rom2apk).
-
-Para mapear o jogo, jogue pelo motor com rastreamento e depois rode a análise:
+To map the game, play through the engine with tracing, then run the analysis:
 
 ```bash
 export PYTHONPATH=tools/snesre
 
-# Jogar registrando o código que roda (snes9x com rastreador; registro em build/chrono-trigger/trace.bin)
+# Play while recording the code that runs (snes9x with a tracer; log in build/chrono-trigger/trace.bin)
 python3 -m snesre play games/chrono-trigger/game.json "Chrono Trigger (USA).sfc"
 
-# Analisar: junta a desmontagem estática com os registros de execução (play e .cdl do Mesen 2)
+# Analyze: join the static disassembly with the execution logs (play, and Mesen 2 .cdl files)
 python3 -m snesre analyze games/chrono-trigger/game.json "Chrono Trigger (USA).sfc"
-# → build/chrono-trigger/disassembly.asm e analysis.json
+# → build/chrono-trigger/disassembly.asm and analysis.json
 ```
 
-A ROM precisa ser exatamente a versão esperada (o SHA-1 está em `games/chrono-trigger/game.json`). Use apenas um dump do seu próprio cartucho.
+The ROM must be exactly the expected version (the SHA-1 is in `games/chrono-trigger/game.json`). Use only a dump of your own cartridge.

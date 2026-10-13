@@ -47,11 +47,24 @@ def build(game_dir: Path, rom_path: Path, dist: Path) -> Path:
     shutil.copytree(tracer.ENGINE / "shaders", resources / "shaders")
     shutil.copy(cores.controller_db_path(), resources / "gamecontrollerdb.txt")
     config = [f"title={app['title']}", f"video={app.get('video', 'pixel')}"]
+    if app.get("remaster"):
+        config.append("remaster=on")
     if app.get("art_capture", False):
         config.append("art_capture=on")
-    pack = build_dir(app) / "hdpack.bin"
-    if pack.exists():
-        shutil.copy(pack, resources / "hdpack.bin")
+    lights = game_dir / app.get("lights", "lights.txt")
+    if lights.exists():
+        shutil.copy(lights, resources / "lights.txt")
+        config.append("lights=lights.txt")
+    if app.get("light_detect") is False:
+        config.append("light_detect=off")
+    if app.get("light_capture", False):
+        config.append("light_capture=on")
+    for style in app.get("art_styles") or []:
+        pack = build_dir(app) / f"hdpack-{style}.bin"
+        if pack.exists():
+            shutil.copy(pack, resources / pack.name)
+    if app.get("art_styles"):
+        config.append("art_styles=" + ",".join(app["art_styles"]))
     config += [f"{key}={value}" for key, value in app.get("options", {}).items()]
     (resources / "game.cfg").write_text("\n".join(config) + "\n")
     _bundle_sdl(executable, frameworks)

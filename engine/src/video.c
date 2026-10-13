@@ -3,15 +3,16 @@
  *   pixel  pixel perfect: square pixels, integer scale, no blending (default)
  *   crt    CRT-Lottes: scanlines, shadow mask and bloom
  *
- * Both use the largest integer scale of the game's base resolution that fits the window. Frames that
- * the core renders at a multiple of the base (HD Mode 7) are detected from their height, so the
- * on-screen size doesn't jump when a scene switches to HD.
+ * Both use the largest integer scale of the game's base resolution that fits the window. A hires
+ * intro is drawn into that same rectangle, so the picture does not change size when the logo starts.
  *
  * Shaders use the RetroArch GLSL conventions (VERTEX/FRAGMENT in one file, COMPAT_* macros), so the
  * same files run on desktop OpenGL 3.2 and on OpenGL ES 3 (Android).
  */
 
 #include "video.h"
+
+#include "remaster.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -206,6 +207,9 @@ bool video_init(SDL_Window *w, const char *shader_dir, const char *profile)
 		fprintf(stderr, "OpenGL: %s\n", SDL_GetError());
 		return false;
 	}
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
+	SDL_GL_SwapWindow(window);
 
 	for (int i = 0; i < PROFILES; i++) {
 		Profile *p = &profiles[i];
@@ -290,7 +294,65 @@ void video_frame(const void *data, unsigned width, unsigned height, size_t pitch
 	upload(data, width, height, pitch, pixel_format);
 }
 
-void video_present(void)
+int video_fit_scale(void)
+{
+	if (getenv("REMASTERIA_CAPTURE"))
+		return REMASTER_SCALE;
+	if (!window)
+		return REMASTER_SCALE;
+	int w, h;
+	SDL_GL_GetDrawableSize(window, &w, &h);
+	if (w < 256 || h < 224)
+		return 1;
+	int fit = w / 256 < h / 224 ? w / 256 : h / 224;
+	if (fit < 1)
+		fit = 1;
+	return fit;
+}
+
+void video_forget(void)
+{
+	source_w = 0;
+}
+
+void video_blank(void)
+{
+	int w, h;
+	SDL_GL_GetDrawableSize(window, &w, &h);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, w, h);
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
+	SDL_GL_SwapWindow(window);
+}
+
+static GLuint warm_tex, warm_fbo;
+static int warm_w, warm_h;
+
+/* The warmup frames must not land on the window. macOS can show the default framebuffer
+ * as soon as it is drawn, even without a swap, and those frames are the slow ones. */
+static void bind_warm_target(int w, int h)
+{
+	if (!warm_tex) {
+		glGenTextures(1, &warm_tex);
+		glGenFramebuffers(1, &warm_fbo);
+		glBindTexture(GL_TEXTURE_2D, warm_tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, warm_fbo);
+	if (warm_w != w || warm_h != h) {
+		glBindTexture(GL_TEXTURE_2D, warm_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w > 0 ? w : 1, h > 0 ? h : 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, warm_tex, 0);
+		warm_w = w;
+		warm_h = h;
+	}
+}
+
+static void present(bool swap, bool to_window)
 {
 	if (!source_w)
 		return;
@@ -298,11 +360,25 @@ void video_present(void)
 	int w, h;
 	SDL_GL_GetDrawableSize(window, &w, &h);
 	int hd = (int)height >= 2 * BASE_HEIGHT ? (int)(height + BASE_HEIGHT / 2) / BASE_HEIGHT : 1;
-	int base_w = width / hd, base_h = height / hd;
-	int scale = w / base_w < h / base_h ? w / base_w : h / base_h;
+	int base_w = (int)width / hd, base_h = (int)height / hd;
+	if (base_w < 1 || base_h < 1)
+		base_w = (int)width, base_h = (int)height, hd = 1;
+	int max_scale = w / base_w < h / base_h ? w / base_w : h / base_h;
+	/* Same rectangle for a 256×224 frame and for the hires intro. Shrinking the
+	 * scale so a 4× logo divides evenly made the picture jump at the start.
+	 * A capture is the remaster grid itself: scaling that grid up to the window
+	 * reshuffles its pixels, so the saved picture stays one remaster pixel per
+	 * screen pixel. */
+	int scale = max_scale;
+	if (getenv("REMASTERIA_CAPTURE") && hd >= 1 && hd <= max_scale)
+		scale = hd;
 	int dst_w, dst_h;
 	if (scale >= 1) {
 		dst_w = base_w * scale, dst_h = base_h * scale;
+	} else if (hd > 1 && w >= base_w * hd && h >= base_h * hd) {
+		int hw = base_w * hd, hh = base_h * hd;
+		int k = w / hw < h / hh ? w / hw : h / hh;
+		dst_w = hw * (k > 0 ? k : 1), dst_h = hh * (k > 0 ? k : 1);
 	} else {  /* window smaller than the game: shrink, keeping the proportion */
 		float fit = (float)w / base_w < (float)h / base_h ? (float)w / base_w : (float)h / base_h;
 		dst_w = (int)(base_w * fit), dst_h = (int)(base_h * fit);
@@ -316,7 +392,10 @@ void video_present(void)
 		const Pass *pass = &p->passes[i];
 		set_filter(input, pass->linear);
 		if (pass->to_screen) {
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			if (to_window)
+				glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			else
+				bind_warm_target(w, h);
 			glViewport(0, 0, w, h);
 			glClearColor(0, 0, 0, 1);
 			glClear(GL_COLOR_BUFFER_BIT);
@@ -346,11 +425,32 @@ void video_present(void)
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 		glDisable(GL_BLEND);
 	}
-	if (capture_path[0]) {
+	if (to_window && capture_path[0]) {
 		write_capture(w, h);
 		capture_path[0] = 0;
 	}
-	SDL_GL_SwapWindow(window);
+	if (!to_window) {
+		glFinish();
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	} else if (swap)
+		SDL_GL_SwapWindow(window);
+	else
+		glFinish();
+}
+
+void video_present(void)
+{
+	present(true, true);
+}
+
+void video_finish(void)
+{
+	present(false, true);
+}
+
+void video_preload(void)
+{
+	present(false, false);
 }
 
 static void write_capture(int w, int h)
