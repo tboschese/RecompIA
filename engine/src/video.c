@@ -20,6 +20,7 @@
 
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
+#include <CoreGraphics/CoreGraphics.h>
 #include <OpenGL/gl3.h>
 #define GLSL_VERSION "#version 150\n"
 #else
@@ -111,7 +112,7 @@ static GLuint compile(GLenum type, const char *define, const char *body, const c
 	return shader;
 }
 
-static GLuint link(const char *body, const char *name)
+static GLuint link_program(const char *body, const char *name)
 {
 	GLuint vs = compile(GL_VERTEX_SHADER, "#define VERTEX\n", body, name);
 	GLuint fs = compile(GL_FRAGMENT_SHADER, "#define FRAGMENT\n", body, name);
@@ -147,7 +148,7 @@ static bool load_shader(Shader *s, const char *dir, const char *file)
 		fprintf(stderr, "shader não encontrado: %s\n", path);
 		return false;
 	}
-	s->program = link(body, file);
+	s->program = link_program(body, file);
 	free(body);
 	if (!s->program)
 		return false;
@@ -232,7 +233,7 @@ bool video_init(SDL_Window *w, const char *shader_dir, const char *profile)
 	intermediate = make_texture();
 	overlay = make_texture();
 	glGenFramebuffers(1, &framebuffer);
-	overlay_program = link(overlay_shader, "overlay");
+	overlay_program = link_program(overlay_shader, "overlay");
 	return true;
 }
 
@@ -296,6 +297,8 @@ void video_frame(const void *data, unsigned width, unsigned height, size_t pitch
 
 int video_fit_scale(void)
 {
+	if (getenv("REMASTERIA_CAPTURE_SCALE"))
+		return atoi(getenv("REMASTERIA_CAPTURE_SCALE"));
 	if (getenv("REMASTERIA_CAPTURE"))
 		return REMASTER_SCALE;
 	if (!window)
@@ -503,3 +506,91 @@ const char *video_profile_name(void)
 {
 	return profiles[current].name;
 }
+
+#ifdef __APPLE__
+static CGDirectDisplayID changed_display;
+static CGDisplayModeRef mode_before;
+
+static void set_display_mode(CGDirectDisplayID display, CGDisplayModeRef mode)
+{
+	CGDisplayConfigRef config;
+	if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess)
+		return;
+	CGConfigureDisplayWithDisplayMode(config, display, mode, NULL);
+	if (CGCompleteDisplayConfiguration(config, kCGConfigureForAppOnly) != kCGErrorSuccess)
+		CGCancelDisplayConfiguration(config);
+}
+
+void video_native_display(int x, int y)
+{
+	CGDirectDisplayID display;
+	uint32_t found = 0;
+	if (changed_display || CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &display, &found) != kCGErrorSuccess || !found)
+		return;
+	const void *keys[] = { kCGDisplayShowDuplicateLowResolutionModes };
+	const void *values[] = { kCFBooleanTrue };
+	CFDictionaryRef options = CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks,
+		&kCFTypeDictionaryValueCallBacks);
+	CFArrayRef modes = CGDisplayCopyAllDisplayModes(display, options);
+	CFRelease(options);
+	CGDisplayModeRef now = CGDisplayCopyDisplayMode(display);
+	if (!modes || !now) {
+		if (modes)
+			CFRelease(modes);
+		CGDisplayModeRelease(now);
+		return;
+	}
+	/* The panel's own pixels: what the modes macOS marks native draw (the scaled modes list
+	 * larger backings than the panel has). */
+	enum { NATIVE_MODE = 0x02000000 }; /* kDisplayModeNativeFlag, IOKit/graphics/IOGraphicsTypes.h */
+	size_t panel_w = 0, panel_h = 0;
+	for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
+		CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+		if ((CGDisplayModeGetIOFlags(m) & NATIVE_MODE) && CGDisplayModeIsUsableForDesktopGUI(m)
+			&& CGDisplayModeGetPixelWidth(m) * CGDisplayModeGetPixelHeight(m) > panel_w * panel_h)
+			panel_w = CGDisplayModeGetPixelWidth(m), panel_h = CGDisplayModeGetPixelHeight(m);
+	}
+	CGDisplayModeRef best = NULL;
+	if (panel_w && (CGDisplayModeGetPixelWidth(now) != panel_w || CGDisplayModeGetPixelHeight(now) != panel_h)) {
+		/* Of the modes drawn at those pixels: the one twice as fine as its points (menus at the usual
+		 * size), then the fastest refresh. */
+		int best_score = -1;
+		for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
+			CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+			if (!CGDisplayModeIsUsableForDesktopGUI(m) || CGDisplayModeGetPixelWidth(m) != panel_w
+				|| CGDisplayModeGetPixelHeight(m) != panel_h)
+				continue;
+			int score = (CGDisplayModeGetWidth(m) * 2 == panel_w ? 1000 : 0) + (int)CGDisplayModeGetRefreshRate(m);
+			if (score > best_score)
+				best_score = score, best = m;
+		}
+	}
+	if (best) {
+		set_display_mode(display, best);
+		changed_display = display;
+		mode_before = now;
+	} else {
+		CGDisplayModeRelease(now);
+	}
+	CFRelease(modes);
+}
+
+void video_restore_display(void)
+{
+	if (!changed_display)
+		return;
+	set_display_mode(changed_display, mode_before);
+	CGDisplayModeRelease(mode_before);
+	changed_display = 0;
+	mode_before = NULL;
+}
+#else
+void video_native_display(int x, int y)
+{
+	(void)x, (void)y;
+}
+
+void video_restore_display(void)
+{
+}
+#endif

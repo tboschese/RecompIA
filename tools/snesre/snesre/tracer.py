@@ -77,7 +77,7 @@ def engine_path() -> Path:
     print("Compilando o motor…", file=sys.stderr)
     flags = subprocess.run(["sdl2-config", "--cflags", "--libs"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
     if platform.system() == "Darwin":
-        flags += ["-framework", "OpenGL", "-lz"]
+        flags += ["-framework", "OpenGL", "-framework", "CoreGraphics", "-framework", "CoreFoundation", "-lz"]
     else:
         flags += ["-lGL", "-lz"]
     target.parent.mkdir(parents=True, exist_ok=True)

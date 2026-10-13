@@ -543,7 +543,15 @@ static void update_title(void);
 static void toggle_fullscreen(void)
 {
 	bool full = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+	if (!full) {
+		int x, y, w, h;
+		SDL_GetWindowPosition(window, &x, &y);
+		SDL_GetWindowSize(window, &w, &h);
+		video_native_display(x + w / 2, y + h / 2);
+	}
 	SDL_SetWindowFullscreen(window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+	if (full)
+		video_restore_display();
 	SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
 }
 
@@ -840,8 +848,12 @@ int main(int argc, char **argv)
 		 * fullscreen afterwards is the resolution change and the hitch at launch. */
 		window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 		SDL_Rect bounds;
-		if (SDL_GetDisplayBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0)
-			window_w = bounds.w, window_h = bounds.h;
+		if (SDL_GetDisplayBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0) {
+			video_native_display(bounds.x + bounds.w / 2, bounds.y + bounds.h / 2);
+			SDL_PumpEvents();
+			if (SDL_GetDisplayBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0)
+				window_w = bounds.w, window_h = bounds.h;
+		}
 	} else {
 		window_w = 256 * 6, window_h = 240 * 6;
 	}
