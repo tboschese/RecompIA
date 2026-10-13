@@ -113,6 +113,7 @@ static char art_choice[64], art_styles[256];
 static int pixel_format;
 static uint32_t thumb[THUMB_WIDTH * THUMB_HEIGHT];
 static const CoreMotion *(*core_motion)(void);
+static const CoreGround *(*core_ground)(void);
 static double remaster_ms;
 static long remaster_calls;
 static bool last_frame_remastered;
@@ -133,6 +134,29 @@ static struct {
 	dispatch_semaphore_t done;
 #endif
 } ahead;
+
+/* The diorama's layers of the picture about to be shown (diorama.h); the core has not run since. */
+static void diorama_update(const void *pixels, size_t pitch, unsigned height, const uint32_t *hd, unsigned hd_width)
+{
+	if (!video_diorama_on())
+		return;
+	const CoreMotion *m = core_motion ? core_motion() : NULL;
+	bool ok = m && m->valid && core_ground && (!hd || hd_width % 256 == 0);
+	video_diorama(ok ? diorama_build(m, core_ground(), pixels, pitch, height, hd, hd ? (int)hd_width / 256 : 1) : NULL);
+}
+
+/* The picture between the last two frames: the diorama moves its own layers halfway, the other
+ * looks get it from motion.c. */
+static const uint32_t *between_picture(unsigned *width, unsigned *height)
+{
+	if (video_diorama_on()) {
+		const uint32_t *now = motion_current(width, height);
+		if (now)
+			video_diorama_phase(0.5f);
+		return now;
+	}
+	return motion_between(width, height);
+}
 
 static void ahead_run(void *unused)
 {
@@ -181,6 +205,7 @@ static const uint32_t *ahead_finish(unsigned *width, unsigned *height)
 		hd = hdpack_render(ahead.pixels, 256 * sizeof(uint32_t), ahead.height, ahead.m, &w, &h);
 	}
 	motion_capture(ahead.pixels, 256, ahead.height, 256 * sizeof(uint32_t), hd, hd ? w / 256 : 0);
+	diorama_update(ahead.pixels, 256 * sizeof(uint32_t), ahead.height, hd, hd ? w : 0);
 	*width = hd ? w : 256;
 	*height = hd ? h : ahead.height;
 	return hd ? hd : ahead.pixels;
@@ -398,6 +423,10 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 	}
 	if (!hd && tiles)
 		hd = hdpack_render(data, pitch, height, m, &hd_width, &hd_height);
+	if (width == 256)
+		diorama_update(data, pitch, height, hd, hd ? hd_width : 0);
+	else
+		video_diorama(NULL);
 	if (hd)
 		video_frame(hd, hd_width, hd_height, hd_width * sizeof(uint32_t));
 	else
@@ -684,6 +713,7 @@ static void reset_game(void)
 {
 	core.reset();
 	motion_reset();
+	diorama_reset();
 }
 
 /* Automated visual checks: REMASTERIA_CAPTURE=out.ppm REMASTERIA_CAPTURE_FRAME=N saves frame N and quits;
@@ -744,6 +774,7 @@ static void warm_up(double refresh_hz)
 	core.unserialize(shot, bytes);
 	free(shot);
 	motion_reset();
+	diorama_reset();
 	audio_position = 0;
 	audio_ratio = 1;
 	audio_last[0] = audio_last[1] = 0;
@@ -852,6 +883,7 @@ int main(int argc, char **argv)
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
 	*(void **)&core_motion = dlsym(lib, "retro_remasteria_motion");
+	*(void **)&core_ground = dlsym(lib, "retro_remasteria_ground");
 	motion_init(core_motion);
 
 	char battery_path[PATH + 16], resume_path[PATH + 16];
@@ -1057,7 +1089,7 @@ int main(int argc, char **argv)
 			unsigned pw, ph, mw, mh;
 			const uint32_t *picture = ahead_finish(&pw, &ph), *middle;
 			Uint64 t0 = SDL_GetPerformanceCounter();
-			if ((middle = motion_between(&mw, &mh))) {
+			if ((middle = between_picture(&mw, &mh))) {
 				between_ms += (SDL_GetPerformanceCounter() - t0) * 1000.0 / frequency;
 				video_frame(middle, mw, mh, mw * sizeof(uint32_t));
 				between_frames++;
@@ -1181,7 +1213,7 @@ int main(int argc, char **argv)
 			unsigned mw, mh;
 			Uint64 t0 = SDL_GetPerformanceCounter();
 			show_current = false;
-			if (can_interpolate && smooth_motion && !fast_forward && due == 1 && (middle = motion_between(&mw, &mh))) {
+			if (can_interpolate && smooth_motion && !fast_forward && due == 1 && (middle = between_picture(&mw, &mh))) {
 				between_ms += (SDL_GetPerformanceCounter() - t0) * 1000.0 / frequency;
 				video_frame(middle, mw, mh, mw * sizeof(uint32_t));
 				show_current = true;

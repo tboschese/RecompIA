@@ -1,6 +1,7 @@
 #ifndef REMASTERIA_REMASTER_H
 #define REMASTERIA_REMASTER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -52,6 +53,10 @@ typedef struct {
 } LightFound;
 void remaster_find_lights(bool on);
 const LightFound *remaster_lights_found(int *count);
+
+/* Whether the console pixel (x, y) of the last remastered frame is part of a letter, with its
+ * outline. */
+bool remaster_glyph(int x, int y);
 
 /* Runs `rows(context, y0, y1)` over 0..height in bands on every core. Only for work where a
  * band writes nothing outside its own rows and reads nothing another band writes. */
