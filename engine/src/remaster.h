@@ -19,8 +19,8 @@
  * stair, copying the color already on the outside. A square corner stays square.
  * A stippled cloud stays
  * the drawing. The cell stays where the game put it.
- * Also: a distant layer steps darker and cooler, and a cool contact shadow sits
- * under sprites. Gameplay stays put: nothing is shifted. */
+ * Also: a contact shadow, one flat step darker in the same tone, sits under
+ * sprites. Gameplay stays put: nothing is shifted. */
 #define REMASTER_SCALE 6
 #define REMASTER_SCALE_MAX 16
 

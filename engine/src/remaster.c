@@ -49,8 +49,17 @@ static uint32_t stair_color[MAX_HEIGHT][WIDTH];
 
 /* Flat step, same hue: 100 leaves the color, above 100 lightens, below darkens.
  * Multiplying keeps a dark boot dark-brown instead of clipping it to black. */
+/* A flat step of the same tone: every channel by one factor. A lighter step stops where the
+ * brightest channel reaches 255, so a cream cloud stays cream instead of turning white. */
 static uint32_t shade(uint32_t color, int percent)
 {
+	int top = (int)(color >> 16 & 255);
+	if ((int)(color >> 8 & 255) > top)
+		top = (int)(color >> 8 & 255);
+	if ((int)(color & 255) > top)
+		top = (int)(color & 255);
+	if (top * percent > 25500)
+		percent = 25500 / top;
 	int channel[3];
 	channel[0] = (int)(color >> 16 & 255) * percent / 100;
 	channel[1] = (int)(color >> 8 & 255) * percent / 100;
@@ -94,8 +103,6 @@ static const uint8_t *src_frame;
 static size_t src_pitch;
 static const CoreMotion *src_motion;
 static unsigned src_height;
-
-static uint32_t tint(uint32_t color, int tr, int tg, int tb, int amount);
 
 /* The color the game drew. A far layer used to be darkened for the whole
  * scanline whenever any nearer pixel shared that line, which laid a straight
@@ -265,20 +272,6 @@ static bool sprite_pixel(int x, int y)
 	if (x < 0 || y < 0 || x >= WIDTH || y >= (int)src_height)
 		return false;
 	return sprite_key(key_at(src_motion, y + src_motion->top, x));
-}
-
-/* One flat step toward another color. The neighbor is not involved, so the pixel stays square. */
-static uint32_t tint(uint32_t color, int tr, int tg, int tb, int amount)
-{
-	if (amount < 0)
-		amount = 0;
-	else if (amount > 100)
-		amount = 100;
-	int keep = 100 - amount;
-	int r = ((int)(color >> 16 & 255) * keep + tr * amount) / 100;
-	int g = ((int)(color >> 8 & 255) * keep + tg * amount) / 100;
-	int b = ((int)(color & 255) * keep + tb * amount) / 100;
-	return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
 static int luma_of(uint32_t color)
@@ -1973,7 +1966,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 						if (ground < 0 || ground > 3)
 							continue;
 						if (prev == 0)
-							image[at] = tint(shade(image[at], 64), 12, 18, 48, 22);
+							image[at] = shade(image[at], 52);
 						shadowed[at] = (uint8_t)k;
 					}
 				}
@@ -2030,7 +2023,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 					if (shadowed[at])
 						continue;
 					shadowed[at] = 1;
-					image[at] = tint(shade(image[at], 64), 12, 18, 48, 22);
+					image[at] = shade(image[at], 52);
 				}
 			}
 		}
