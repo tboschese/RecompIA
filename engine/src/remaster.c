@@ -134,9 +134,9 @@ static uint8_t sprite_body[MAX_HEIGHT][WIDTH];
 /* A warm cliff is many colors. The column of the body, not of one stripe, carries the light. */
 static uint8_t warm_above[MAX_HEIGHT][WIDTH];
 static uint8_t warm_below[MAX_HEIGHT][WIDTH];
-/* A letter of any width, with the one-pixel outline around it: a small near-white shape with
- * a dark outline or drop shadow on at least a quarter of its border. It keeps every pixel the
- * game drew. */
+/* A letter of any width, with the one-pixel outline around it: a small white shape with a dark
+ * outline or drop shadow on at least a quarter of its border, on a window that is not dark. It
+ * keeps every pixel the game drew. */
 static bool glyph[MAX_HEIGHT][WIDTH];
 
 static bool sprite_pixel(int x, int y);
@@ -148,7 +148,7 @@ static bool letter_ink(uint32_t color)
 	int r = (int)(color >> 16 & 255), g = (int)(color >> 8 & 255), b = (int)(color & 255);
 	int lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
 	int hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
-	return lo >= 180 && hi - lo <= 40;
+	return lo >= 180 && hi - lo <= 24;
 }
 
 static void find_glyphs(int height)
@@ -183,6 +183,13 @@ static void find_glyphs(int height)
 			}
 			if (max_x - min_x >= MAX_W || max_y - min_y >= MAX_H || count > MAX_INK)
 				continue;
+			bool character = false;
+			for (int i = 0; i < count && !character; i++) {
+				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
+				character = sprite_pixel(cx, cy) && sprite_body[cy][cx] >= 14;
+			}
+			if (character)
+				continue; /* a highlight on a character, who is lit as a body */
 			int border = 0, dark = 0;
 			for (int i = 0; i < count; i++) {
 				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
@@ -196,6 +203,22 @@ static void find_glyphs(int height)
 					}
 			}
 			if (border == 0 || dark * 4 < border)
+				continue;
+			/* Past the outline a letter sits on its window. Art in a black void has only dark there. */
+			int panel = 0, lit = 0;
+			for (int i = 0; i < count; i++) {
+				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
+				for (int dy = -2; dy <= 2; dy++)
+					for (int dx = -2; dx <= 2; dx++) {
+						int ny = cy + dy, nx = cx + dx;
+						if ((dy > -2 && dy < 2 && dx > -2 && dx < 2) || ny < 0 || nx < 0 || ny >= height || nx >= WIDTH
+							|| letter_ink(grid[ny][nx]))
+							continue;
+						panel++;
+						lit += luma_of(grid[ny][nx]) >= 28;
+					}
+			}
+			if (lit * 10 < panel * 3)
 				continue;
 			for (int i = 0; i < count; i++) {
 				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
