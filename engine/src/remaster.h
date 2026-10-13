@@ -28,6 +28,9 @@
  * (HD Mode 7, hires, interlace): those stay on the core's own picture. */
 const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height, const CoreMotion *m,
 	unsigned *width, unsigned *out_height);
+/* The scale the next remaster_frame draws at; 0 asks the window. Set it before running the
+ * remaster off the main thread, which must not ask the window. */
+void remaster_use_scale(int scale);
 
 /* Dynamic light. A game's lights.txt (tools/remasteria lights) names its lights by tile, with
  * the key the HD packs use: one line per tile, "key kind luma [r g b radius]". kind is flame
@@ -49,5 +52,10 @@ typedef struct {
 } LightFound;
 void remaster_find_lights(bool on);
 const LightFound *remaster_lights_found(int *count);
+
+/* Runs `rows(context, y0, y1)` over 0..height in bands on every core. Only for work where a
+ * band writes nothing outside its own rows and reads nothing another band writes. */
+typedef void RowsFn(void *context, int y0, int y1);
+void remaster_bands(int height, RowsFn *rows, void *context);
 
 #endif

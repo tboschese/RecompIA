@@ -123,7 +123,7 @@ static bool can_draw(uint8_t d, uint8_t z, bool backward)
 
 /* One console pixel, shifted halfway, as a scale x scale block. Used when the pixel moves
  * vertically: a horizontal run is copied with memcpy instead. */
-static void splat_pixel(const Frame *f, int scale, int out_w, int out_h, int y, int x, int dx, int dy, uint8_t z, bool backward)
+static void splat_pixel(const Frame *f, int scale, int out_w, int y0, int y1, int y, int x, int dx, int dy, uint8_t z, bool backward)
 {
 	int tx = scale * x + dx * scale / 2, ty = scale * y + dy * scale / 2;
 	uint8_t drawn = backward ? (uint8_t)(z | BACKWARD) : z;
@@ -131,7 +131,7 @@ static void splat_pixel(const Frame *f, int scale, int out_w, int out_h, int y, 
 	for (int j = 0; j < scale; j++)
 		for (int i = 0; i < scale; i++) {
 			int px = tx + i, py = ty + j;
-			if (px < 0 || py < 0 || px >= out_w || py >= out_h)
+			if (px < 0 || py < y0 || px >= out_w || py >= y1)
 				continue;
 			size_t at = (size_t)py * out_w + px;
 			if (!can_draw(depth[at], z, backward))
@@ -144,7 +144,7 @@ static void splat_pixel(const Frame *f, int scale, int out_w, int out_h, int y, 
 /* Copies a horizontal run of console pixels already shifted by dx. Long stretches of one
  * layer (the usual camera scroll) move with memcpy; only the columns a nearer sprite already
  * claimed are left in place. */
-static void splat_run(const Frame *f, int scale, int out_w, int y, int x0, int x1, int dx, uint8_t z, bool backward, bool fresh, bool uniform)
+static void splat_run(const Frame *f, int scale, int out_w, int y0, int y1, int y, int x0, int x1, int dx, uint8_t z, bool backward, bool fresh, bool uniform)
 {
 	int shift = dx * scale / 2;
 	int base_y = y * scale;
@@ -162,16 +162,21 @@ static void splat_run(const Frame *f, int scale, int out_w, int y, int x0, int x
 	if (n <= 0)
 		return;
 	uint8_t drawn = backward ? (uint8_t)(z | BACKWARD) : z;
+	int first = base_y < y0 ? y0 - base_y : 0, last = base_y + scale > y1 ? y1 - base_y : scale;
+	if (first >= last)
+		return;
+	if (first > 0 || last < scale)
+		uniform = false;
 	if (!backward && fresh) {
-		for (int j = 0; j < scale; j++) {
+		for (int j = first; j < last; j++) {
 			size_t at = (size_t)(base_y + j) * out_w + dst0;
 			memcpy(&between[at], &f->hd[(size_t)(base_y + j) * out_w + src0 + src_skip], (size_t)n * sizeof(uint32_t));
 			memset(&depth[at], drawn, (size_t)n);
 		}
 		return;
 	}
-	int subrows = uniform ? 1 : scale;
-	for (int j = 0; j < subrows; j++) {
+	int subrows = uniform ? 1 : last;
+	for (int j = first; j < subrows; j++) {
 		uint8_t *drow = &depth[(size_t)(base_y + j) * out_w + dst0];
 		int i = 0;
 		while (i < n) {
@@ -195,12 +200,19 @@ static void splat_run(const Frame *f, int scale, int out_w, int y, int x0, int x
 /* Moves every pixel of `f` halfway towards `other`, drawing scale x scale blocks with priority
  * (the pixel's color, or its block of HD art). The newer frame only fills what the older one
  * leaves uncovered. */
-static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool backward, int scale)
+static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool backward, int scale, int y0, int y1)
 {
 	const CoreMotion *a = &f->motion, *b = &other->motion;
-	int out_w = WIDTH * scale, out_h = (int)f->height * scale;
-	bool crossed = false; /* a vertically moving pixel can land on other rows */
-	for (unsigned y = 0; y < f->height; y++) {
+	int out_w = WIDTH * scale;
+	/* Only console rows that can reach screen rows y0..y1. A band that starts below the top
+	 * cannot know whether a row above it moved into its rows, so it never assumes them empty. */
+	int from = y0 / scale - MAX_STEP / 2 - 1, to = (y1 - 1) / scale + MAX_STEP / 2 + 2;
+	if (from < 0)
+		from = 0;
+	if (to > (int)f->height)
+		to = (int)f->height;
+	bool crossed = y0 > 0; /* a vertically moving pixel can land on other rows */
+	for (unsigned y = (unsigned)from; y < (unsigned)to; y++) {
 		int row = (int)y + a->top;
 		bool fresh = !crossed;
 		for (int x = 0; x < WIDTH;) {
@@ -225,14 +237,14 @@ static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool
 				continue;
 			}
 			if (dy == 0 && f->has_hd)
-				splat_run(f, scale, out_w, (int)y, x, x1, dx, z, backward, fresh, !crossed);
+				splat_run(f, scale, out_w, y0, y1, (int)y, x, x1, dx, z, backward, fresh, !crossed);
 			else {
 				if (dy != 0)
 					crossed = true;
 				for (int xx = x; xx < x1; xx++) {
 					int pdx, pdy;
 					pixel_motion(a, b, match, row, xx, &pdx, &pdy);
-					splat_pixel(f, scale, out_w, out_h, (int)y, xx, pdx, pdy, z, backward);
+					splat_pixel(f, scale, out_w, y0, y1, (int)y, xx, pdx, pdy, z, backward);
 				}
 			}
 			fresh = false;
@@ -240,6 +252,14 @@ static void splat(const Frame *f, const Frame *other, const uint8_t *match, bool
 		}
 	}
 }
+
+typedef struct {
+	const Frame *old, *now;
+	const uint8_t *forward, *backward;
+	int scale;
+} Between;
+
+static void between_rows(void *context, int y0, int y1);
 
 const uint32_t *motion_between(unsigned *width, unsigned *height)
 {
@@ -262,11 +282,23 @@ const uint32_t *motion_between(unsigned *width, unsigned *height)
 	} else {
 		return NULL;
 	}
-	unsigned out_w = WIDTH * scale, out_h = old->height * scale;
-	memset(depth, 0, (size_t)out_w * out_h);
-	splat(old, now, forward, false, scale);
-	splat(now, old, backward, true, scale);
-	for (unsigned y = 0; y < out_h; y++) {
+	Between job = { old, now, forward, backward, scale };
+	remaster_bands((int)old->height * scale, between_rows, &job);
+	*width = WIDTH * scale;
+	*height = old->height * scale;
+	return between;
+}
+
+static void between_rows(void *context, int y0, int y1)
+{
+	const Between *job = context;
+	const Frame *old = job->old;
+	int scale = job->scale;
+	unsigned out_w = WIDTH * scale;
+	memset(&depth[(size_t)y0 * out_w], 0, (size_t)out_w * (unsigned)(y1 - y0));
+	splat(old, job->now, job->forward, false, scale, y0, y1);
+	splat(job->now, old, job->backward, true, scale, y0, y1);
+	for (unsigned y = (unsigned)y0; y < (unsigned)y1; y++) {
 		const uint32_t *src = old->has_hd ? &old->hd[y * out_w] : NULL;
 		unsigned x = 0;
 		while (x < out_w) {
@@ -284,9 +316,6 @@ const uint32_t *motion_between(unsigned *width, unsigned *height)
 					between[y * out_w + i] = old->pixels[(y / 2) * WIDTH + i / 2];
 		}
 	}
-	*width = out_w;
-	*height = out_h;
-	return between;
 }
 
 const uint32_t *motion_current(unsigned *width, unsigned *height)

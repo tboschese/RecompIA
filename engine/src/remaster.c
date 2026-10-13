@@ -18,9 +18,6 @@ static uint8_t shadowed[MAX_HEIGHT * REMASTER_SCALE_MAX * WIDTH * REMASTER_SCALE
 static int scale = REMASTER_SCALE;
 #define SCALE scale
 
-/* Runs `rows(context, y0, y1)` over 0..height in bands on every core. Only for work whose
- * console row writes its own screen rows and reads nothing another band writes. */
-typedef void RowsFn(void *context, int y0, int y1);
 #define BANDS 8
 typedef struct {
 	RowsFn *rows;
@@ -36,7 +33,7 @@ static void band(void *bands, size_t i)
 		b->rows(b->context, y0, y1);
 }
 
-static void in_bands(int height, RowsFn *rows, void *context)
+void remaster_bands(int height, RowsFn *rows, void *context)
 {
 	Bands b = { rows, context, height };
 #ifdef __APPLE__
@@ -1078,7 +1075,7 @@ static void bevel(unsigned out_w, unsigned out_h)
 {
 	prepare_grid();
 	Canvas canvas = { out_w, out_h, (int)src_height };
-	in_bands(canvas.height, bevel_rows, &canvas);
+	remaster_bands(canvas.height, bevel_rows, &canvas);
 }
 
 /* Dynamic light. The game already marks what glows: a flame drawn in the
@@ -1825,7 +1822,7 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 	}
 
 	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
-	in_bands(h, apply_rows, &canvas);
+	remaster_bands(h, apply_rows, &canvas);
 }
 
 static void apply_rows(void *context, int y0, int y1)
@@ -1878,6 +1875,13 @@ static void fill_rows(void *context, int y0, int y1)
 	}
 }
 
+static int scale_hint;
+
+void remaster_use_scale(int scale)
+{
+	scale_hint = scale;
+}
+
 const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height, const CoreMotion *m,
 	unsigned *width, unsigned *out_height)
 {
@@ -1889,7 +1893,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	src_motion = m;
 	src_height = height;
 
-	int fit = video_fit_scale();
+	int fit = scale_hint > 0 ? scale_hint : video_fit_scale();
 	if (fit < 1)
 		fit = 1;
 	if (fit > REMASTER_SCALE_MAX)
@@ -1900,7 +1904,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_h = height * SCALE;
 
 	Canvas canvas = { out_w, out_h, (int)height };
-	in_bands((int)height, fill_rows, &canvas);
+	remaster_bands((int)height, fill_rows, &canvas);
 
 	bevel(out_w, out_h);
 	stairs(out_w);

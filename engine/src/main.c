@@ -30,6 +30,9 @@
  */
 
 #include <SDL.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -112,6 +115,75 @@ static const CoreMotion *(*core_motion)(void);
 static double remaster_ms;
 static long remaster_calls;
 static bool last_frame_remastered;
+
+/* Ahead: with two refreshes per game frame, a frame's remaster runs in the background while the
+ * frame before it is on screen, and its in-between picture is drawn on the next refresh. Emulation,
+ * remaster and in-between together are longer than one refresh; split this way each refresh only
+ * waits for its own part. */
+static struct {
+	bool on, pending;
+	uint32_t pixels[256 * 240];
+	unsigned height;
+	const CoreMotion *m;
+	const uint32_t *hd;
+	unsigned hd_width, hd_height;
+	double ms;
+#ifdef __APPLE__
+	dispatch_semaphore_t done;
+#endif
+} ahead;
+
+static void ahead_run(void *unused)
+{
+	(void)unused;
+	Uint64 t0 = SDL_GetPerformanceCounter();
+	ahead.hd = remaster_frame(ahead.pixels, 256 * sizeof(uint32_t), ahead.height, ahead.m, &ahead.hd_width, &ahead.hd_height);
+	ahead.ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+#ifdef __APPLE__
+	dispatch_semaphore_signal(ahead.done);
+#endif
+}
+
+static void ahead_start(const void *data, size_t pitch, unsigned height, const CoreMotion *m)
+{
+	for (unsigned y = 0; y < height; y++)
+		memcpy(&ahead.pixels[y * 256], (const char *)data + y * pitch, 256 * sizeof(uint32_t));
+	ahead.height = height;
+	ahead.m = m;
+	ahead.pending = true;
+	remaster_use_scale(video_fit_scale());
+#ifdef __APPLE__
+	if (!ahead.done)
+		ahead.done = dispatch_semaphore_create(0);
+	dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), NULL, ahead_run);
+#else
+	ahead_run(NULL);
+#endif
+}
+
+/* Waits for the background remaster and keeps the frame for motion; returns the picture to show
+ * when there is no in-between. The core has not run since, so its CoreMotion is still this frame's. */
+static const uint32_t *ahead_finish(unsigned *width, unsigned *height)
+{
+#ifdef __APPLE__
+	dispatch_semaphore_wait(ahead.done, DISPATCH_TIME_FOREVER);
+#endif
+	ahead.pending = false;
+	remaster_use_scale(0);
+	const uint32_t *hd = ahead.hd;
+	unsigned w = ahead.hd_width, h = ahead.hd_height;
+	last_frame_remastered = hd != NULL;
+	if (hd) {
+		remaster_ms += ahead.ms;
+		remaster_calls++;
+	} else {
+		hd = hdpack_render(ahead.pixels, 256 * sizeof(uint32_t), ahead.height, ahead.m, &w, &h);
+	}
+	motion_capture(ahead.pixels, 256, ahead.height, 256 * sizeof(uint32_t), hd, hd ? w / 256 : 0);
+	*width = hd ? w : 256;
+	*height = hd ? h : ahead.height;
+	return hd ? hd : ahead.pixels;
+}
 
 static bool environment(unsigned cmd, void *data)
 {
@@ -307,6 +379,12 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 	unsigned hd_width, hd_height;
 	/* The game project turns the remaster on. REMASTERIA_RAW keeps the console frame. */
 	bool draw_remaster = (remaster_on || getenv("REMASTERIA_REMASTER")) && !getenv("REMASTERIA_RAW");
+	if (ahead.on && tiles && draw_remaster && !art_capture && !light_dir[0]) {
+		ahead_start(data, pitch, height, m);
+		update_thumb(data, width, height, pitch);
+		stash_console(data, width, height, pitch);
+		return;
+	}
 	Uint64 remaster_t0 = SDL_GetPerformanceCounter();
 	const uint32_t *hd = NULL;
 	last_frame_remastered = false;
@@ -966,7 +1044,35 @@ int main(int argc, char **argv)
 	bool show_stats = getenv("REMASTERIA_STATS") != NULL;  /* pacing diagnostics on stdout */
 	Uint32 stats_start = SDL_GetTicks();
 	long frames_run_stats = 0;
+	bool capture_between = false;
 	while (running) {
+		if (ahead.pending) {
+			/* The refresh after a frame's emulation: its in-between picture. */
+			unsigned pw, ph, mw, mh;
+			const uint32_t *picture = ahead_finish(&pw, &ph), *middle;
+			Uint64 t0 = SDL_GetPerformanceCounter();
+			if ((middle = motion_between(&mw, &mh))) {
+				between_ms += (SDL_GetPerformanceCounter() - t0) * 1000.0 / frequency;
+				video_frame(middle, mw, mh, mw * sizeof(uint32_t));
+				between_frames++;
+			} else {
+				video_frame(picture, pw, ph, pw * sizeof(uint32_t));
+			}
+			if (capture_between) {
+				if (getenv("REMASTERIA_CAPTURE_MENU"))
+					menu_show(getenv("REMASTERIA_CAPTURE_MENU"));
+				video_capture_next(getenv("REMASTERIA_CAPTURE"));
+			}
+			video_set_overlay(menu_draw(), MENU_WIDTH, MENU_HEIGHT);
+			video_present();
+			if (capture_between) {
+				write_console();
+				if (getenv("REMASTERIA_CAPTURE_SAVE"))
+					save_state(getenv("REMASTERIA_CAPTURE_SAVE"));
+				running = false;
+			}
+			continue;
+		}
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
 			if (input_handle_event(&event, menu_toast) || menu_handle_event(&event))
@@ -1027,6 +1133,7 @@ int main(int argc, char **argv)
 			due = 1;
 		}
 		bool run_frame = due > 0;
+		ahead.on = can_interpolate && smooth_motion && !fast_forward && due == 1;
 		for (long f = 0; f < due; f++) {
 			Uint64 t0 = SDL_GetPerformanceCounter();
 			if (capture_frame && getenv("REMASTERIA_CAPTURE_PRESS")) {
@@ -1043,7 +1150,9 @@ int main(int argc, char **argv)
 			frames_done++;
 			frames_run_stats++;
 			update_audio_ratio();
-			if (capture_frame && ++frames_run == capture_frame) {
+			if (capture_frame && ++frames_run == capture_frame && ahead.pending) {
+				capture_between = true;  /* the capture is this frame's in-between, drawn next */
+			} else if (capture_frame && frames_run == capture_frame) {
 				if (getenv("REMASTERIA_CAPTURE_MENU"))
 					menu_show(getenv("REMASTERIA_CAPTURE_MENU"));
 				video_capture_next(getenv("REMASTERIA_CAPTURE"));
@@ -1053,7 +1162,15 @@ int main(int argc, char **argv)
 				running = false;
 			}
 		}
-		if (run_frame) {
+		ahead.on = false;
+		if (run_frame && ahead.pending) {
+			/* This refresh still shows the frame before; the one just emulated is being drawn. */
+			const uint32_t *now;
+			unsigned nw, nh;
+			if ((now = motion_current(&nw, &nh)))
+				video_frame(now, nw, nh, nw * sizeof(uint32_t));
+			show_current = false;
+		} else if (run_frame) {
 			const uint32_t *middle;
 			unsigned mw, mh;
 			Uint64 t0 = SDL_GetPerformanceCounter();
@@ -1100,6 +1217,10 @@ int main(int argc, char **argv)
 
 		if (!synced && !capture_frame)
 			SDL_Delay(1);  /* without vsync, poll the clock gently */
+	}
+	if (ahead.pending) {
+		unsigned w, h;
+		ahead_finish(&w, &h);
 	}
 
 	save_battery(battery_path);
