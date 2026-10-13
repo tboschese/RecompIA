@@ -134,9 +134,81 @@ static uint8_t sprite_body[MAX_HEIGHT][WIDTH];
 /* A warm cliff is many colors. The column of the body, not of one stripe, carries the light. */
 static uint8_t warm_above[MAX_HEIGHT][WIDTH];
 static uint8_t warm_below[MAX_HEIGHT][WIDTH];
+/* A letter of any width, with the one-pixel outline around it: a small near-white shape with
+ * a dark outline or drop shadow on at least a quarter of its border. It keeps every pixel the
+ * game drew. */
+static bool glyph[MAX_HEIGHT][WIDTH];
 
 static bool sprite_pixel(int x, int y);
 static bool warm_body(uint32_t color);
+static int luma_of(uint32_t color);
+
+static bool letter_ink(uint32_t color)
+{
+	int r = (int)(color >> 16 & 255), g = (int)(color >> 8 & 255), b = (int)(color & 255);
+	int lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
+	int hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+	return lo >= 180 && hi - lo <= 40;
+}
+
+static void find_glyphs(int height)
+{
+	enum { MAX_W = 12, MAX_H = 16, MAX_INK = 120 };
+	static uint8_t seen[MAX_HEIGHT][WIDTH];
+	static int stack[WIDTH * MAX_HEIGHT], marks[WIDTH * MAX_HEIGHT];
+	memset(seen, 0, sizeof seen);
+	memset(glyph, 0, sizeof glyph);
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < WIDTH; x++) {
+			if (seen[y][x] || !letter_ink(grid[y][x]))
+				continue;
+			int top = 0, count = 0;
+			int min_x = x, max_x = x, min_y = y, max_y = y;
+			stack[top++] = y * WIDTH + x;
+			seen[y][x] = 1;
+			while (top > 0) {
+				int pos = stack[--top];
+				marks[count++] = pos;
+				int cy = pos / WIDTH, cx = pos - cy * WIDTH;
+				min_x = cx < min_x ? cx : min_x, max_x = cx > max_x ? cx : max_x;
+				min_y = cy < min_y ? cy : min_y, max_y = cy > max_y ? cy : max_y;
+				for (int dy = -1; dy <= 1; dy++)
+					for (int dx = -1; dx <= 1; dx++) {
+						int ny = cy + dy, nx = cx + dx;
+						if (ny < 0 || nx < 0 || ny >= height || nx >= WIDTH || seen[ny][nx] || !letter_ink(grid[ny][nx]))
+							continue;
+						seen[ny][nx] = 1;
+						stack[top++] = ny * WIDTH + nx;
+					}
+			}
+			if (max_x - min_x >= MAX_W || max_y - min_y >= MAX_H || count > MAX_INK)
+				continue;
+			int border = 0, dark = 0;
+			for (int i = 0; i < count; i++) {
+				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
+				for (int dy = -1; dy <= 1; dy++)
+					for (int dx = -1; dx <= 1; dx++) {
+						int ny = cy + dy, nx = cx + dx;
+						if (ny < 0 || nx < 0 || ny >= height || nx >= WIDTH || letter_ink(grid[ny][nx]))
+							continue;
+						border++;
+						dark += luma_of(grid[ny][nx]) < 70;
+					}
+			}
+			if (border == 0 || dark * 4 < border)
+				continue;
+			for (int i = 0; i < count; i++) {
+				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
+				for (int dy = -1; dy <= 1; dy++)
+					for (int dx = -1; dx <= 1; dx++) {
+						int ny = cy + dy, nx = cx + dx;
+						if (ny >= 0 && nx >= 0 && ny < height && nx < WIDTH)
+							glyph[ny][nx] = true;
+					}
+			}
+		}
+	}
+}
 
 static void prepare_grid(void)
 {
@@ -265,6 +337,7 @@ static void prepare_grid(void)
 			}
 		}
 	}
+	find_glyphs(height);
 }
 
 static bool sprite_pixel(int x, int y)
@@ -631,6 +704,8 @@ static void stairs(unsigned out_w)
 	}
 	for (int y = 1; y < height - 1; y++) {
 		for (int x = 2; x < WIDTH - 2; x++) {
+			if (glyph[y][x])
+				continue;
 			/* A checker dot matches on both axes and stays drawn. A warm edge against
 			 * a flat field matches on one axis only; that is a step, not stipple. */
 			bool checker = false;
@@ -991,6 +1066,8 @@ static void bevel_rows(void *context, int y0, int y1)
 	for (int y = y0; y < y1; y++) {
 		for (int x = 0; x < WIDTH; x++) {
 			uint32_t here = grid[y][x];
+			if (glyph[y][x])
+				continue;
 			if (sprite_pixel(x, y)) {
 				/* The body, measured on the silhouette. Color runs of one pixel
 				 * are the hair and the cloth, not a reason to skip the character.
