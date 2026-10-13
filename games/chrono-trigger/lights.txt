@@ -989,3 +989,32 @@ e921a3dc0764b321  glow    170   255 227 148 -
 13015f6e9fde5c75  none    239   255 252 252 -
 aa6b6aaf8cce531e  none    239   255 252 252 -
 e99bf0367ffeb303  none    247   255 252 252 -
+
+## 134 160,16-169,22 sugestão window /Users/thiagoboschese/Documents/RemasterIA/build/chrono-trigger/luzes-varredura/c00304/1791930019-0000007.ppm
+6dda3a2cd21a815d  ?       242   255 253 255 -
+
+## 135 97,21-110,30 sugestão window /Users/thiagoboschese/Documents/RemasterIA/build/chrono-trigger/luzes-varredura/c00422/1791930032-0000001.ppm
+1eb912046c9cecd4  ?       250   255 255 246 -
+2e8d3a19ff9dab37  ?       250   255 255 246 -
+435b7c005326727e  ?       250   255 255 246 -
+da8cbace1c0a7f9c  ?       250   255 255 246 -
+
+## 136 97,32-110,42 sugestão window /Users/thiagoboschese/Documents/RemasterIA/build/chrono-trigger/luzes-varredura/c00422/1791930032-0000001.ppm
+1c183916045e3046  ?       220   252 255 229 -
+25d9235aa55c633a  ?       255   252 255 229 -
+626d674f3ce23a91  ?       220   252 255 229 -
+6bd508ec0ded4a39  ?       220   252 255 229 -
+a2dfce4bd3f4096b  ?       255   252 255 229 -
+f44db8c98fb83ab2  ?       220   252 255 229 -
+
+## 137 240,147-247,164 sugestão window /Users/thiagoboschese/Documents/RemasterIA/build/chrono-trigger/luzes-varredura/semente-f011040/1791930037-0000001.ppm
+1663d1a84e1aa8a1  ?       255   255 255 255 -
+59a45906042b43b8  ?       255   255 255 255 -
+
+## 138 234,198-255,222 sugestão window /Users/thiagoboschese/Documents/RemasterIA/build/chrono-trigger/luzes-varredura/semente-f011040/1791930037-0000001.ppm
+252f68a59f5b4395  ?       255   255 255 255 -
+624994932b4497b2  ?       255   255 255 255 -
+8bf1cd61812ca10f  ?       255   255 255 255 -
+a2219959504a556b  ?       255   255 255 255 -
+d5efc1dc1680faf6  ?       255   255 255 255 -
+fb26f2f584b046ef  ?       255   255 255 255 -

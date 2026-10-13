@@ -18,7 +18,10 @@
  * other key is passed to the core as an option (e.g. snes9x_mode7_hires=4x_hv). Shaders come from
  * Resources/shaders, or $REMASTERIA_SHADERS; in development $REMASTERIA_HDPACK (a folder of packs)
  * and $REMASTERIA_ART_CAPTURE (a folder) do the same for the art, $REMASTERIA_LIGHTS (a file) and
- * $REMASTERIA_LIGHT_CAPTURE (a folder) for the lights.
+ * $REMASTERIA_LIGHT_CAPTURE (a folder) for the lights. Headless with $REMASTERIA_EXPLORE (a folder)
+ * is one run of the sweep (explore.c), from $REMASTERIA_EXPLORE_FROM (a state) or power-on, with
+ * the keys in $REMASTERIA_EXPLORE_KNOWN already found and $REMASTERIA_EXPLORE_SEED for the input.
+ * Headless with $REMASTERIA_HEADLESS_FROM (a state) plays on from it with no input.
  *
  * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
  * live in DATA_DIR, by default ~/Library/Application Support/RemasterIA/<title>/.
@@ -43,6 +46,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "explore.h"
 #include "hdpack.h"
 #include "input.h"
 #include "remaster.h"
@@ -106,6 +110,8 @@ static bool video_ready;
 static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
 static int headless_button = BTN_START;
+static unsigned explore_held;
+static bool explore_due;
 static char lights_file[PATH], light_dir[PATH];
 static bool light_capture;
 static bool fast_forward, quit, headless_start, smooth_motion = true, art_capture, remaster_on;
@@ -249,7 +255,7 @@ static unsigned console_copy_w, console_copy_h;
 /* Keeps the latest console picture so the capture frame can be saved beside the remaster. */
 static void stash_console(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-	if (pixel_format != VIDEO_XRGB8888 || (!getenv("REMASTERIA_CAPTURE") && !light_dir[0]) || !data
+	if (pixel_format != VIDEO_XRGB8888 || (!getenv("REMASTERIA_CAPTURE") && !light_dir[0] && !explore_on()) || !data
 		|| width == 0 || width > 512 || height == 0 || height > 480)
 		return;
 	if (pitch < width * sizeof(uint32_t))
@@ -368,6 +374,11 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 	bool tiles = m && m->valid && width == 256 && height + m->top <= 240;
 	if (tiles && art_capture && !fast_forward)
 		hdpack_capture(data, pitch, height, m);
+	if (explore_on()) {
+		stash_console(data, width, height, pitch);
+		explore_due = tiles && explore_frame(m, height);
+		return;
+	}
 	if (!video_ready) {
 		stash_console(data, width, height, pitch);
 		if (tiles && light_dir[0]) {
@@ -474,6 +485,8 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index, unsig
 	(void)index;
 	if (device != DEVICE_JOYPAD || id >= BUTTONS)
 		return 0;
+	if (explore_on())
+		return port == 0 && (explore_held >> id & 1);
 	if (headless_start)
 		return port == 0 && (int)id == headless_button;
 	return input_down((int)port, (int)id);
@@ -888,6 +901,32 @@ int main(int argc, char **argv)
 		aspect = (float)av.base_width / av.base_height;  /* square pixels */
 	double fps = av.fps > 0 ? av.fps : 60.0;
 
+	if (headless_frames && getenv("REMASTERIA_EXPLORE")) {
+		const char *out = getenv("REMASTERIA_EXPLORE");
+		mkdir(out, 0755);
+		explore_init(out, getenv("REMASTERIA_EXPLORE_KNOWN"),
+			getenv("REMASTERIA_EXPLORE_SEED") ? (unsigned)atol(getenv("REMASTERIA_EXPLORE_SEED")) : 1);
+		if (getenv("REMASTERIA_EXPLORE_FROM") && !load_state(getenv("REMASTERIA_EXPLORE_FROM")))
+			fail("não consegui carregar o estado");
+		for (long i = 0; i < headless_frames; i++) {
+			explore_held = explore_buttons(i);
+			core.run();
+			if (explore_due || (i == headless_frames - 1 && explore_pending())) {
+				char name[32], path[PATH + 48];
+				snprintf(name, sizeof name, "s%06ld", i + 1);
+				snprintf(path, sizeof path, "%s/%s.ppm", out, name);
+				write_console_to(path);
+				snprintf(path, sizeof path, "%s/%s.state", out, name);
+				save_state(path);
+				explore_keep(name);
+			}
+		}
+		core.unload_game();
+		core.deinit();
+		SDL_Quit();
+		return 0;
+	}
+
 	if (headless_frames) {
 		bool idle = getenv("REMASTERIA_HEADLESS_IDLE") != NULL;  /* let the intro play instead of pressing Start */
 		/* A survey of the game for testing the remaster: every N frames, the console
@@ -895,6 +934,12 @@ int main(int argc, char **argv)
 		const char *survey = getenv("REMASTERIA_SURVEY");
 		long every = getenv("REMASTERIA_SURVEY_EVERY") ? atol(getenv("REMASTERIA_SURVEY_EVERY")) : 300;
 		bool press_a = getenv("REMASTERIA_SURVEY_PRESS_A") != NULL;  /* A after the title, to get past menus and dialog */
+		/* From a state, untouched: the light scan of the sweep's scenes (tools/remasteria lights scan). */
+		if (getenv("REMASTERIA_HEADLESS_FROM")) {
+			if (!load_state(getenv("REMASTERIA_HEADLESS_FROM")))
+				fail("não consegui carregar o estado");
+			idle = true;
+		}
 		for (long i = 0; i < headless_frames; i++) {
 			headless_start = !idle && i % 120 < 4;
 			headless_button = press_a && i >= 600 ? BTN_A : BTN_START;

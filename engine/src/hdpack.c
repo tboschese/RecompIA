@@ -136,6 +136,15 @@ uint64_t hdpack_key(const CoreMotion *m, int row, int x)
 	return pixel_key(m, row, x);
 }
 
+uint64_t hdpack_shape(const CoreMotion *m, int row, int x)
+{
+	int format = m->format[row][x];
+	if (!format || format > 3)
+		return 0;
+	uint64_t h = data_hash(m, format, m->tile[row][x] & VRAM_MASK) ^ 0x5bd1e9955bd1e995ULL;
+	return h ? h : 1;
+}
+
 /* ---- the packs, one per style ---- */
 
 #define MAX_STYLES 8

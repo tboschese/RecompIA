@@ -1,0 +1,28 @@
+{
+ "name": "Ultimate Mortal Kombat 3 (USA)",
+ "sha1": "09c094ca1114bcb6d5917e989686ca79b96cf9ea",
+ "app": {
+  "title": "Ultimate Mortal Kombat 3",
+  "id": "ultimate-mortal-kombat-3",
+  "version": "0.1.0",
+  "remaster": true,
+  "lights": "lights.txt",
+  "icon_seconds": 30,
+  "core": "bsnes-hd",
+  "video": "pixel",
+  "options": {
+   "bsnes_ppu_show_overscan": "ON",
+   "bsnes_video_aspectcorrection": "OFF",
+   "bsnes_ppu_no_sprite_limit": "ON",
+   "bsnes_mode7_scale": "4x",
+   "bsnes_mode7_perspective": "auto (wide)",
+   "bsnes_mode7_supersample": "none",
+   "bsnes_mode7_mosaic": "1x scale",
+   "bsnes_mode7_wsMode": "none",
+   "bsnes_mode7_widescreen": "none",
+   "bsnes_dsp_cubic": "ON"
+  }
+ },
+ "entries": [],
+ "labels": {}
+}

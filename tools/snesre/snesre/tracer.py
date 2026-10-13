@@ -20,6 +20,7 @@ SNES9X_COMMIT = "fae2fea08f74180759ef540ee94259213f503480"
 SOURCES = Path(__file__).resolve().parent.parent / "tracer"
 ENGINE = Path(__file__).resolve().parents[3] / "engine"
 ENGINE_SOURCES = ("src/main.c", "src/video.c", "src/video.h", "src/input.c", "src/input.h", "src/menu.c", "src/menu.h", "src/motion.c", "src/motion.h", "src/remaster.c", "src/remaster.h", "src/hdpack.c", "src/hdpack.h",
+                  "src/explore.c", "src/explore.h",
                   "src/third_party/font8x8_basic.h", "src/third_party/font8x8_ext_latin.h")
 CORE_FILES = ("snesre_trace.cpp", "snesre_trace.h")
 

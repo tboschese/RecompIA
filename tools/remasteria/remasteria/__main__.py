@@ -1,6 +1,8 @@
 """RemasterIA: o software que gera o remaster de um jogo.
 
     PYTHONPATH=tools/remasteria python3 -m remasteria mac games/<jogo> caminho/da/rom
+    PYTHONPATH=tools/remasteria python3 -m remasteria new caminho/da/rom
+    PYTHONPATH=tools/remasteria python3 -m remasteria sweep games/<jogo> caminho/da/rom
     PYTHONPATH=tools/remasteria python3 -m remasteria lights survey|review|decide|test games/<jogo> …
 
 Cada jogo é uma pasta em games/. O comando confere a ROM, compila o motor e o núcleo,
@@ -31,6 +33,18 @@ def main() -> int:
                     help="pastas de captura (padrão: a do app, ~/Library/Application Support/RemasterIA/<título>/arte)")
     hd.add_argument("--upscaler", choices=("esrgan", "nearest"), default="esrgan",
                     help="esrgan: IA Real-ESRGAN (padrão); nearest: só amplia, para testar o caminho")
+    nw = sub.add_parser("new", help="jogo novo: cria o projeto pela ROM, varre o jogo e prepara a revisão das luzes")
+    nw.add_argument("rom", type=Path)
+    nw.add_argument("--minutes", type=float, default=30, help="tempo máximo da varredura (padrão: 30)")
+    nw.add_argument("--seeds", type=Path, nargs="*", default=[], help="estados de quem jogou, como na varredura")
+    sw = sub.add_parser("sweep", help="o motor joga sozinho até ver o jogo todo: um catálogo de cada tile e de cada cena")
+    sw.add_argument("game", type=Path)
+    sw.add_argument("rom", type=Path)
+    sw.add_argument("--minutes", type=float, default=30, help="tempo máximo (padrão: 30; para antes se nada novo aparece)")
+    sw.add_argument("--workers", type=int, default=8, help="jogos em paralelo (padrão: 8)")
+    sw.add_argument("--frames", type=int, default=1800, help="quadros de cada partida a partir de uma cena (padrão: 1800, 30 s)")
+    sw.add_argument("--seeds", type=Path, nargs="*", default=[],
+                    help="estados de quem jogou (arquivos ou pastas), para a varredura partir de onde o acaso não chega")
     li = sub.add_parser("lights", help="as luzes dinâmicas do jogo, por tile: levantar, revisar, decidir, testar")
     lsub = li.add_subparsers(dest="action", required=True)
     sv = lsub.add_parser("survey", help="o motor joga sozinho e salva cenas, estados e as luzes que a detecção acha")
@@ -39,6 +53,13 @@ def main() -> int:
     sv.add_argument("--frames", type=int, default=36000, help="quadros a jogar (padrão: 36000, 10 minutos)")
     sv.add_argument("--every", type=int, default=240, help="uma cena a cada N quadros (padrão: 240)")
     sv.add_argument("--press", action="store_true", help="aperta Start e A para passar dos menus (padrão: assiste à abertura)")
+    sc = lsub.add_parser("scan", help="a detecção em cada cena da varredura; junta o que achar no lights.txt para revisar")
+    sc.add_argument("game", type=Path)
+    sc.add_argument("rom", type=Path)
+    sc.add_argument("--workers", type=int, default=8)
+    sr = lsub.add_parser("score", help="nota da detecção sozinha nas cenas varridas, contra o que a revisão decidiu")
+    sr.add_argument("game", type=Path)
+    sr.add_argument("rom", type=Path)
     rv = lsub.add_parser("review", help="junta as luzes achadas no lights.txt como ? e desenha a página de revisão")
     rv.add_argument("game", type=Path)
     rv.add_argument("captures", type=Path, nargs="*", help="pastas de luzes (padrão: build/<id>/luzes e a do app)")
@@ -59,6 +80,24 @@ def main() -> int:
             print(f"pronto: {bundle}\n  abra com: open \"{bundle}\"")
         elif args.command == "lights":
             return _lights(args)
+        elif args.command == "new":
+            from . import lights, project, sweep
+
+            game = project.create(args.rom)
+            print(f"projeto: {game}")
+            result = sweep.sweep(game, args.rom, args.minutes, seeds=args.seeds)
+            print(f"varredura: {result['tiles']} tiles no catálogo ({result['scenery']} desenhos de cenário) "
+                  f"em {result['cells']} cenas")
+            page, added, pending = lights.review(game, lights.scan(game, args.rom))
+            print(f"luzes: {added} grupos, {pending} a decidir\n  revise: open \"{page}\"\n"
+                  f"  decida: remasteria lights decide {game} 1=glow 2=none …\n"
+                  f"  gere o app: remasteria mac {game} \"{args.rom}\"")
+        elif args.command == "sweep":
+            from . import sweep
+
+            result = sweep.sweep(args.game, args.rom, args.minutes, args.workers, args.frames, args.seeds)
+            print(f"{result['tiles']} tiles no catálogo ({result['scenery']} desenhos de cenário) em {result['cells']} cenas "
+                  f"({result['rounds']} rodadas): {result['dir']}")
         else:
             from . import hdpack
 
@@ -85,6 +124,19 @@ def _lights(args) -> int:
     if args.action == "survey":
         states, found = lights.survey(args.game, args.rom, args.frames, args.every, args.press)
         print(f"cenas e estados em {states}\nluzes achadas em {found}\nagora: remasteria lights review {args.game}")
+    elif args.action == "scan":
+        found = lights.scan(args.game, args.rom, workers=args.workers)
+        page, added, pending = lights.review(args.game, found)
+        print(f"luzes em {len(found)} cenas; {added} grupos novos no {lights.lights_file(args.game)}; {pending} a decidir\n"
+              f"  abra: open \"{page}\"")
+    elif args.action == "score":
+        s = lights.score(args.game, args.rom)
+        c = s["counts"]
+        print(f"detecção ({s['engine']}): {c['luz']} tiles que a revisão chamou de luz, {c['não']} que chamou de "
+              f"não-luz, {c['sem revisão']} sem revisão; achou {s['lights_found']} das {s['lights']} luzes da lista "
+              f"nas cenas varridas")
+        for cell, n in s["wrong_scenes"]:
+            print(f"  {cell}: {n} tiles de não-luz")
     elif args.action == "review":
         page, added, pending = lights.review(args.game, args.captures or None)
         print(f"{added} grupos novos no {lights.lights_file(args.game)}; {pending} a decidir\n  abra: open \"{page}\"")

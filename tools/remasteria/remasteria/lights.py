@@ -158,7 +158,7 @@ def review(game: Path, dirs: list[Path] | None = None) -> tuple[Path, int, int]:
     if not lines:
         lines = HEADER.rstrip("\n").splitlines()
     number = max([int(m.group(1)) for m in map(GROUP.match, lines) if m] + [0])
-    added = 0
+    fresh: list[dict] = []
     for group in candidates(dirs or capture_dirs(game)):
         # The color the detection saw, until someone sets it. Not its reach: a tile is often one
         # piece of the light, and the reach follows the piece.
@@ -170,17 +170,38 @@ def review(game: Path, dirs: list[Path] | None = None) -> tuple[Path, int, int]:
         new = {key: luma for key, luma in group["tiles"].items() if key not in where}
         if not new:
             continue
+        for key in new:
+            where[key] = -1
+        # An animated light (a torch, lava) shows other tiles in each drawing, found in many
+        # scenes: one group where the same light sits in the same place.
+        same = next((f for f in fresh if f["kind"] == group["kind"] and _same_light(f, group)), None)
+        if same:
+            same["tiles"].update(new)
+        else:
+            fresh.append(dict(group, tiles=new))
+    for group in fresh:
         number += 1
-        added += 1
+        r, g, b, _ = group["light"]
         x0, y0, x1, y1 = group["box"]
         lines.append("")
         lines.append(f"## {number} {x0},{y0}-{x1},{y1} sugestão {group['kind']} {group['picture']}")
-        for key, luma in sorted(new.items()):
-            where[key] = len(lines)
+        for key, luma in sorted(group["tiles"].items()):
             lines.append(f"{key}  ?       {luma:<4}  {r:<3} {g:<3} {b:<3} -")
+    added = len(fresh)
     path.write_text("\n".join(lines) + "\n")
     page, pending = draw_review(game)
     return page, added, pending
+
+
+def _same_light(a: dict, b: dict) -> bool:
+    """Two finds of one light: about the same color, at about the same height on the screen
+    (a figure walking in front cuts a band of lava or a row of lamps somewhere else each time)."""
+    if max(abs(x - y) for x, y in zip(a["light"][:3], b["light"][:3])) > 32:
+        return False
+    _, ay0, _, ay1 = a["box"]
+    _, by0, _, by1 = b["box"]
+    overlap = min(ay1, by1) - max(ay0, by0) + 1
+    return overlap * 2 >= min(ay1 - ay0 + 1, by1 - by0 + 1)
 
 
 def _groups(lines: list[str]) -> list[dict]:
@@ -320,6 +341,78 @@ def survey(game: Path, rom: Path, frames: int, every: int, press: bool) -> tuple
         subprocess.run([str(tracer.engine_path()), str(cores.core_path(app.get("core", "snes9x"))), str(rom_file),
                         tmp, str(frames)], env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return states, found
+
+
+def scan(game: Path, rom: Path, frames: int = 45, workers: int = 8, report=print, use_list: bool = True,
+         folder: str = "luzes-varredura") -> list[Path]:
+    """The detection on every scene of the sweep (remasteria sweep), each played on for `frames`
+    with no input, so a flame is seen in more than one drawing. Tiles the list already names are
+    not found again (unless not use_list). Returns the folders of what was found, for review."""
+    from concurrent.futures import ThreadPoolExecutor
+    from . import sweep
+
+    app = _app(game)
+    cells_dir = sweep.sweep_dir(game) / "cells"
+    cells = sorted(p.name[:-len(".state.z")] for p in cells_dir.glob("*.state.z"))
+    if not cells:
+        raise RuntimeError(f"nenhuma cena varrida: rode antes remasteria sweep {game} <rom>")
+    out = macapp.build_dir(app) / folder
+    engine, core = tracer.engine_path(), cores.core_path(app.get("core", "snes9x"))
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        config, rom_file = _config(game, tmp), tmp / "game.sfc"
+        shutil.copy(rom, rom_file)
+
+        def one(cell: str) -> None:
+            found = out / cell
+            if (found / "feito").exists():
+                return
+            work = tmp / cell
+            (work / "data").mkdir(parents=True)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("REMASTERIA")}
+            env.update(REMASTERIA_CONFIG=str(config), REMASTERIA_HEADLESS_FROM=str(sweep.state_file(cells_dir, cell, work)),
+                       REMASTERIA_LIGHT_CAPTURE=str(found), REMASTERIA_LIGHT_DETECT="on")
+            if use_list and lights_file(game).exists():
+                env["REMASTERIA_LIGHTS"] = str(lights_file(game))
+            try:
+                subprocess.run([str(engine), str(core), str(rom_file), str(work / "data"), str(frames)], env=env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                found.mkdir(parents=True, exist_ok=True)
+                (found / "feito").touch()
+            except subprocess.TimeoutExpired:
+                pass
+            shutil.rmtree(work, ignore_errors=True)
+
+        with ThreadPoolExecutor(workers) as pool:
+            for i, _ in enumerate(pool.map(one, cells)):
+                if (i + 1) % 200 == 0:
+                    report(f"{i + 1}/{len(cells)} cenas")
+    return [d for d in sorted(out.iterdir()) if (d / "candidates.tsv").exists()]
+
+
+def score(game: Path, rom: Path, workers: int = 8, report=print) -> dict:
+    """How the detection alone does on the swept scenes, against what the review decided: the
+    lights it finds that were judged lights, and those judged not to be. The engine is part of
+    the folder's name, so a change to the detection is a new score."""
+    lines, where = read_lights(lights_file(game))
+    decided = {key: lines[i].split()[1] for key, i in where.items()}
+    engine = tracer.engine_path().name
+    found = scan(game, rom, workers=workers, report=report, use_list=False, folder=f"luzes-nota/{engine}")
+    tiles: dict[str, str] = {}
+    for folder in found:
+        for line in (folder / "candidates.tsv").read_text().splitlines():
+            tiles.setdefault(line.split("\t")[0], folder.name)
+    counts = {"luz": 0, "não": 0, "sem revisão": 0}
+    wrong: dict[str, int] = {}
+    for key, cell in tiles.items():
+        kind = decided.get(key, "?")
+        group = "luz" if kind in ("flame", "glow", "window") else "não" if kind == "none" else "sem revisão"
+        counts[group] += 1
+        if group == "não":
+            wrong[cell] = wrong.get(cell, 0) + 1
+    lit = {k for k, v in decided.items() if v in ("flame", "glow", "window")}
+    return {"engine": engine, "counts": counts, "lights_found": len(lit & tiles.keys()), "lights": len(lit),
+            "wrong_scenes": sorted(wrong.items(), key=lambda kv: -kv[1])[:10]}
 
 
 def test(game: Path, rom: Path, states: Path | None, frame: int, detect: bool) -> dict:

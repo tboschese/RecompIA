@@ -32,6 +32,8 @@ const uint32_t *hdpack_render(const void *pixels, size_t pitch, unsigned height,
  * hdpack_keys_begin() once per frame, before the first. */
 void hdpack_keys_begin(void);
 uint64_t hdpack_key(const CoreMotion *m, int row, int x);
+/* The tile's graphics alone, whatever its palette: a fade or a flash changes the key, not this. */
+uint64_t hdpack_shape(const CoreMotion *m, int row, int x);
 
 /* Art capture: while the game is played, saves to `dir` the frames that show tiles (or parts of
  * tiles) not seen before, clean (full brightness, no color math), for the pack builder. */
