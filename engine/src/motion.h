@@ -7,8 +7,6 @@
 
 /* What each visible pixel of the last frame is made of, exported by the patched bsnes-hd core
  * (retro_remasteria_motion; tools/remasteria/patches/bsnes-hd.patch). Same layout as there. */
-typedef struct { uint16_t x; uint8_t y, character, attributes, size; } CoreObject;
-
 typedef struct {
 	uint32_t frame;
 	uint8_t valid;              /* false for HD (mode 7), hires and interlaced frames */
@@ -19,7 +17,7 @@ typedef struct {
 	uint8_t mode[240];          /* BG mode of each line; 0xff when blank */
 	uint16_t hoffset[240][4];
 	uint16_t voffset[240][4];
-	CoreObject objects[128];
+	struct { uint16_t x; uint8_t y, character, attributes, size; } objects[128];
 	/* Tile identity of each pixel, for the HD art (hdpack.c). */
 	uint8_t brightness[240];    /* 0-15 */
 	uint16_t tile[240][256];    /* VRAM word address of the tile's first row */
@@ -49,9 +47,6 @@ void motion_capture(const void *pixels, unsigned width, unsigned height, size_t 
  * remaster's own scale), or NULL when they can't be interpolated (scene cut, HD mode 7, other
  * frame sizes). */
 const uint32_t *motion_between(unsigned *width, unsigned *height);
-/* Which object of `b` each object of `a` became (index, or 0xff): same palette and size, closest
- * position, preferring the same tile and the same OAM slot. */
-void motion_match_objects(const CoreObject *a, const CoreObject *b, uint8_t *match);
 /* The last captured frame (its HD version when there is one), to show after the halfway one. */
 const uint32_t *motion_current(unsigned *width, unsigned *height);
 

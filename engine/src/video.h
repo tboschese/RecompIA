@@ -6,8 +6,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "diorama.h"
-
 enum { VIDEO_0RGB1555, VIDEO_XRGB8888, VIDEO_RGB565 };
 
 /* Creates the OpenGL context on `window` and loads the shaders from `shader_dir`.
@@ -30,12 +28,6 @@ void video_blank(void);
 void video_forget(void);
 /* RGBA image (bytes in memory order) blended over the game at the same scale; NULL hides it. */
 void video_set_overlay(const uint32_t *rgba, int width, int height);
-/* Diorama look (diorama.h): the layers of the picture that follows, NULL when it has none (it is
- * then drawn pixel perfect). The phase moves the next present halfway back towards the frame
- * before, for the 120 Hz in-between; it goes back to 0 after that present. */
-bool video_diorama_on(void);
-void video_diorama(const Diorama *layers);
-void video_diorama_phase(float phase);
 bool video_set_vsync(bool on);
 void video_next_profile(void);
 const char *video_profile_name(void);

@@ -1264,11 +1264,6 @@ void remaster_detect_lights(bool on)
 	detect_lights = on;
 }
 
-bool remaster_glyph(int x, int y)
-{
-	return x >= 0 && y >= 0 && x < WIDTH && y < MAX_HEIGHT && glyph[y][x];
-}
-
 void remaster_find_lights(bool on)
 {
 	finding_lights = on;

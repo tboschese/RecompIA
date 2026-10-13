@@ -2,10 +2,8 @@
  *
  *   pixel  pixel perfect: square pixels, integer scale, no blending (default)
  *   crt    CRT-Lottes: scanlines, shadow mask and bloom
- *   diorama the room as a board seen a little from the front, characters standing on it as
- *          cutouts, windows flat in front, depth of field (diorama.h)
  *
- * Pixel and CRT use the largest integer scale of the game's base resolution that fits the window. A hires
+ * Both use the largest integer scale of the game's base resolution that fits the window. A hires
  * intro is drawn into that same rectangle, so the picture does not change size when the logo starts.
  *
  * Shaders use the RetroArch GLSL conventions (VERTEX/FRAGMENT in one file, COMPAT_* macros), so the
@@ -14,10 +12,7 @@
 
 #include "video.h"
 
-#include "diorama.h"
 #include "remaster.h"
-
-#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,13 +48,11 @@ typedef struct {
 	int count;
 	Shader shaders[MAX_PASSES];
 	bool ready;
-	bool diorama;
 } Profile;
 
 static Profile profiles[] = {
-	{ "pixel", "Pixel perfect", { { "pixel.glsl", false, true } }, 1, { { 0 } }, false, false },
-	{ "crt", "CRT", { { "crt-lottes.glsl", false, true } }, 1, { { 0 } }, false, false },
-	{ "diorama", "Diorama", { { "pixel.glsl", false, true } }, 1, { { 0 } }, false, true },
+	{ "pixel", "Pixel perfect", { { "pixel.glsl", false, true } }, 1, { { 0 } }, false },
+	{ "crt", "CRT", { { "crt-lottes.glsl", false, true } }, 1, { { 0 } }, false },
 };
 #define PROFILES (int)(sizeof profiles / sizeof profiles[0])
 #define PIXEL 0
@@ -84,134 +77,6 @@ static const char overlay_shader[] =
 	"#else\n"
 	"in vec2 uv; out vec4 color; uniform sampler2D Texture;\n"
 	"void main() { color = texture(Texture, uv); }\n"
-	"#endif\n";
-
-/* Diorama. The board is the console picture laid on the floor, seen from a camera tilted
- * TILT degrees from straight down, DISTANCE board heights away. */
-#define TILT 24.0
-#define DISTANCE 2.6
-#define FOCUS_TAPS 32
-
-static struct {
-	GLuint board, cutout, flat, gather, focus;
-	GLuint under, ids, scene, scene_fbo, blurred, blurred_fbo;
-	int scene_w, scene_h;
-	float taps[FOCUS_TAPS * 3];
-	bool has;        /* layers for the picture uploaded */
-	float phase;     /* 0 the frame itself; 0.5 halfway back to the one before */
-	Diorama layers;
-} dio;
-
-static const char board_shader[] =
-	"#ifdef GL_ES\nprecision highp float; precision highp int;\n#endif\n"
-	"#ifdef VERTEX\n"
-	"in vec4 VertexCoord; in vec4 TexCoord;\n"
-	"void main() { gl_Position = VertexCoord; }\n"
-	"#else\n"
-	"out vec4 color;\n"
-	"uniform sampler2D Picture; uniform sampler2D Under;\n"
-	"uniform mat3 ToBoard; uniform vec2 Board; uniform int Scale; uniform float Phase; uniform vec2 Shift[240];\n"
-	"uniform vec3 Focus;\n"
-	"float blur(float v) { float d = v - Focus.x; return clamp((abs(d) - Focus.y) / Focus.z, 0.0, 1.0) * (d > 0.0 ? 0.55 : 1.0); }\n"
-	"void main() {\n"
-	"  vec3 p = ToBoard * vec3(gl_FragCoord.xy, 1.0);\n"
-	"  vec2 uv = p.xy / p.z;\n"
-	"  int row = int(clamp(floor(uv.y), 0.0, Board.y - 1.0));\n"
-	"  uv += Shift[row] * Phase;\n"
-	"  if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= Board.x || uv.y >= Board.y) {\n"
-	"    float edge = max(max(-uv.x, uv.x - Board.x), max(-uv.y, uv.y - Board.y));\n"
-	"    color = vec4(vec3(0.045, 0.040, 0.050) * (1.0 - clamp(edge / 160.0, 0.0, 0.6)), 1.0);\n"
-	"    return;\n"
-	"  }\n"
-	"  ivec2 cell = ivec2(floor(uv));\n"
-	"  vec4 under = texelFetch(Under, cell, 0);\n"
-	"  vec3 c = texelFetch(Picture, ivec2(floor(uv * float(Scale))), 0).rgb;\n"
-	"  if (under.a > 0.5) c = under.rgb;\n"
-	"  color = vec4(c, blur(uv.y));\n"
-	"}\n"
-	"#endif\n";
-
-/* A cutout: a quad standing on its feet. Box is its rectangle in console pixels. */
-static const char cutout_shader[] =
-	"#ifdef GL_ES\nprecision highp float; precision highp int;\n#endif\n"
-	"#ifdef VERTEX\n"
-	"in vec4 VertexCoord; in vec4 TexCoord; out vec2 uv;\n"
-	"uniform vec4 Rect; uniform vec4 Box; uniform vec2 Window;\n"
-	"void main() {\n"
-	"  vec2 t = VertexCoord.xy * 0.5 + 0.5;\n"
-	"  vec2 at = mix(Rect.xy, Rect.zw, t);\n"
-	"  gl_Position = vec4(at / Window * 2.0 - 1.0, 0.0, 1.0);\n"
-	"  uv = vec2(mix(Box.x, Box.z, t.x), mix(Box.w, Box.y, t.y));\n"
-	"}\n"
-	"#else\n"
-	"in vec2 uv; out vec4 color;\n"
-	"uniform sampler2D Picture; uniform sampler2D Ids; uniform int Scale; uniform int Id; uniform float Blur;\n"
-	"void main() {\n"
-	"  ivec2 cell = ivec2(floor(uv));\n"
-	"  if (int(texelFetch(Ids, cell, 0).r * 255.0 + 0.5) != Id) discard;\n"
-	"  color = vec4(texelFetch(Picture, ivec2(floor(uv * float(Scale))), 0).rgb, Blur);\n"
-	"}\n"
-	"#endif\n";
-
-/* Windows: flat in front of the board, at the largest integer scale that fits over it. */
-static const char flat_shader[] =
-	"#ifdef GL_ES\nprecision highp float; precision highp int;\n#endif\n"
-	"#ifdef VERTEX\n"
-	"in vec4 VertexCoord; in vec4 TexCoord; out vec2 uv;\n"
-	"uniform vec2 Board;\n"
-	"void main() { gl_Position = VertexCoord; uv = TexCoord.xy * Board; }\n"
-	"#else\n"
-	"in vec2 uv; out vec4 color;\n"
-	"uniform sampler2D Picture; uniform sampler2D Ids; uniform int Scale;\n"
-	"void main() {\n"
-	"  ivec2 cell = ivec2(floor(uv));\n"
-	"  if (texelFetch(Ids, cell, 0).r < 0.99) discard;\n"
-	"  color = vec4(texelFetch(Picture, ivec2(floor(uv * float(Scale))), 0).rgb, 0.0);\n"
-	"}\n"
-	"#endif\n";
-
-/* Depth of field, at a quarter of the window's pixels: the scene shrinks, each pixel gathers the pixels
- * around it whose own blur reaches it, and the window takes the blurred picture only where the
- * scene asks for blur. A sharp pixel gathers nothing, so the board in focus and the windows keep
- * their hard pixels. */
-static const char gather_shader[] =
-	"#ifdef GL_ES\nprecision highp float; precision highp int;\n#endif\n"
-	"#ifdef VERTEX\n"
-	"in vec4 VertexCoord; in vec4 TexCoord;\n"
-	"void main() { gl_Position = VertexCoord; }\n"
-	"#else\n"
-	"out vec4 color;\n"
-	"uniform sampler2D Scene; uniform float Radius; uniform vec3 Taps[32];\n"
-	"void main() {\n"
-	"  ivec2 at = ivec2(gl_FragCoord.xy);\n"
-	"  ivec2 size = textureSize(Scene, 2);\n"
-	"  vec4 center = texelFetch(Scene, at, 2);\n"
-	"  float r = center.a * Radius;\n"
-	"  vec3 sum = center.rgb; float weight = 1.0;\n"
-	"  for (int i = 0; i < 32; i++) {\n"
-	"    float d = Taps[i].z * r;\n"
-	"    vec4 s = texelFetch(Scene, clamp(at + ivec2(Taps[i].xy * r), ivec2(0), size - 1), 2);\n"
-	"    float w = step(d, s.a * Radius + 0.5);\n"
-	"    sum += s.rgb * w; weight += w;\n"
-	"  }\n"
-	"  color = vec4(sum / weight, center.a);\n"
-	"}\n"
-	"#endif\n";
-
-static const char focus_shader[] =
-	"#ifdef GL_ES\nprecision highp float; precision highp int;\n#endif\n"
-	"#ifdef VERTEX\n"
-	"in vec4 VertexCoord; in vec4 TexCoord; out vec2 uv;\n"
-	"void main() { gl_Position = VertexCoord; uv = VertexCoord.xy * 0.5 + 0.5; }\n"
-	"#else\n"
-	"in vec2 uv; out vec4 color;\n"
-	"uniform sampler2D Scene; uniform sampler2D Blurred; uniform float Radius;\n"
-	"void main() {\n"
-	"  vec4 sharp = texelFetch(Scene, ivec2(gl_FragCoord.xy), 0);\n"
-	"  float r = sharp.a * Radius;\n"
-	"  if (r < 1.0) { color = vec4(sharp.rgb, 1.0); return; }\n"
-	"  color = vec4(mix(sharp.rgb, texture(Blurred, uv).rgb, clamp(r - 1.0, 0.0, 1.0)), 1.0);\n"
-	"}\n"
 	"#endif\n";
 
 static char *read_text(const char *path)
@@ -369,30 +234,6 @@ bool video_init(SDL_Window *w, const char *shader_dir, const char *profile)
 	overlay = make_texture();
 	glGenFramebuffers(1, &framebuffer);
 	overlay_program = link_program(overlay_shader, "overlay");
-	for (int i = 0; i < PROFILES; i++)
-		if (profiles[i].diorama && profiles[i].ready) {
-			dio.board = link_program(board_shader, "diorama board");
-			dio.cutout = link_program(cutout_shader, "diorama cutout");
-			dio.flat = link_program(flat_shader, "diorama flat");
-			dio.gather = link_program(gather_shader, "diorama gather");
-			dio.focus = link_program(focus_shader, "diorama focus");
-			profiles[i].ready = dio.board && dio.cutout && dio.flat && dio.gather && dio.focus;
-			if (!profiles[i].ready && current == i)
-				current = PIXEL;
-			dio.under = make_texture();
-			dio.ids = make_texture();
-			dio.scene = make_texture();
-			dio.blurred = make_texture();
-			glBindTexture(GL_TEXTURE_2D, dio.blurred);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glGenFramebuffers(1, &dio.scene_fbo);
-			glGenFramebuffers(1, &dio.blurred_fbo);
-			for (int t = 0; t < FOCUS_TAPS; t++) {  /* a disc, evenly: golden angle, area-even radii */
-				float radius = sqrtf((t + 0.5f) / FOCUS_TAPS), angle = t * 2.39996f;
-				dio.taps[t * 3] = cosf(angle) * radius, dio.taps[t * 3 + 1] = sinf(angle) * radius, dio.taps[t * 3 + 2] = radius;
-			}
-		}
 	return true;
 }
 
@@ -514,197 +355,6 @@ static void bind_warm_target(int w, int h)
 	}
 }
 
-static void project(const double m[9], double u, double v, double *x, double *y)
-{
-	double z = m[6] * u + m[7] * v + m[8];
-	*x = (m[0] * u + m[1] * v + m[2]) / z;
-	*y = (m[3] * u + m[4] * v + m[5]) / z;
-}
-
-static void invert(const double m[9], float out[9])
-{
-	double a = m[4] * m[8] - m[5] * m[7], b = m[5] * m[6] - m[3] * m[8], c = m[3] * m[7] - m[4] * m[6];
-	double det = m[0] * a + m[1] * b + m[2] * c;
-	double r[9] = {
-		a, m[2] * m[7] - m[1] * m[8], m[1] * m[5] - m[2] * m[4],
-		b, m[0] * m[8] - m[2] * m[6], m[2] * m[3] - m[0] * m[5],
-		c, m[1] * m[6] - m[0] * m[7], m[0] * m[4] - m[1] * m[3],
-	};
-	for (int i = 0; i < 9; i++)
-		out[i] = (float)(r[i] / det);
-}
-
-static float focus_blur(float v, const float focus[3])
-{
-	float d = v - focus[0], a = (fabsf(d) - focus[1]) / focus[2];
-	a = a < 0 ? 0 : a > 1 ? 1 : a;
-	return d > 0 ? a * 0.55f : a;
-}
-
-/* Board to window pixels (y up): the camera looks at the board's middle from DISTANCE board
- * heights, TILT degrees off straight down; the board fills the window as far as it fits. */
-static void board_camera(int w, int h, float board_h, double out[9], double box[4])
-{
-	double tilt = TILT * M_PI / 180, up = cos(tilt), toward = sin(tilt);
-	double c = board_h / 2, d = DISTANCE * board_h;
-	double m[9] = { 1, 0, -128, 0, -up, c * up, 0, -toward, d + c * toward };
-	double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
-	for (int i = 0; i < 4; i++) {
-		double x, y;
-		project(m, i & 1 ? 256 : 0, i & 2 ? board_h : 0, &x, &y);
-		x0 = x < x0 ? x : x0, x1 = x > x1 ? x : x1, y0 = y < y0 ? y : y0, y1 = y > y1 ? y : y1;
-	}
-	double k = 0.97 * (w / (x1 - x0) < h / (y1 - y0) ? w / (x1 - x0) : h / (y1 - y0));
-	double ox = w / 2.0 - k * (x0 + x1) / 2, oy = h / 2.0 - k * (y0 + y1) / 2;
-	for (int i = 0; i < 3; i++) {
-		out[i] = k * m[i] + ox * m[6 + i];
-		out[3 + i] = k * m[3 + i] + oy * m[6 + i];
-		out[6 + i] = m[6 + i];
-	}
-	box[0] = k * x0 + ox, box[1] = k * y0 + oy, box[2] = k * x1 + ox, box[3] = k * y1 + oy;
-}
-
-static void draw_diorama(int w, int h, bool to_window)
-{
-	const Diorama *d = &dio.layers;
-	int scale = source_w / 256;
-	float board_h = (float)d->height, phase = dio.phase;
-	float focus[3] = { 0.56f * board_h, 0.16f * board_h, 0.30f * board_h };
-	double camera[9], box[4];
-	float to_board[9];
-	board_camera(w, h, board_h, camera, box);
-	invert(camera, to_board);
-
-	if (dio.scene_w != w || dio.scene_h != h) {
-		glBindTexture(GL_TEXTURE_2D, dio.scene);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glBindFramebuffer(GL_FRAMEBUFFER, dio.scene_fbo);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dio.scene, 0);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 2);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-		glBindTexture(GL_TEXTURE_2D, dio.blurred);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w / 4 > 0 ? w / 4 : 1, h / 4 > 0 ? h / 4 : 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glBindFramebuffer(GL_FRAMEBUFFER, dio.blurred_fbo);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dio.blurred, 0);
-		dio.scene_w = w, dio.scene_h = h;
-	}
-	glBindFramebuffer(GL_FRAMEBUFFER, dio.scene_fbo);
-	glViewport(0, 0, w, h);
-	glDisable(GL_BLEND);
-	set_filter(source, false);
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, dio.under);
-	glActiveTexture(GL_TEXTURE2);
-	glBindTexture(GL_TEXTURE_2D, dio.ids);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, source);
-
-	glUseProgram(dio.board);
-	glUniform1i(glGetUniformLocation(dio.board, "Picture"), 0);
-	glUniform1i(glGetUniformLocation(dio.board, "Under"), 1);
-	glUniformMatrix3fv(glGetUniformLocation(dio.board, "ToBoard"), 1, GL_TRUE, to_board);
-	glUniform2f(glGetUniformLocation(dio.board, "Board"), 256, board_h);
-	glUniform1i(glGetUniformLocation(dio.board, "Scale"), scale);
-	glUniform1f(glGetUniformLocation(dio.board, "Phase"), phase);
-	glUniform2fv(glGetUniformLocation(dio.board, "Shift"), (GLsizei)d->height, &d->shift[0][0]);
-	glUniform3fv(glGetUniformLocation(dio.board, "Focus"), 1, focus);
-	glBindVertexArray(vao_screen);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-	/* Cutouts far to near, each standing where its feet are on the board. */
-	int order[DIORAMA_SPRITES];
-	for (int i = 0; i < d->sprites; i++) {
-		int j = i;
-		float feet = d->sprite[i].y1 - phase * d->sprite[i].dy;
-		while (j > 0 && d->sprite[order[j - 1]].y1 - phase * d->sprite[order[j - 1]].dy > feet) {
-			order[j] = order[j - 1];
-			j--;
-		}
-		order[j] = i;
-	}
-	glUseProgram(dio.cutout);
-	glUniform1i(glGetUniformLocation(dio.cutout, "Picture"), 0);
-	glUniform1i(glGetUniformLocation(dio.cutout, "Ids"), 2);
-	glUniform1i(glGetUniformLocation(dio.cutout, "Scale"), scale);
-	glUniform2f(glGetUniformLocation(dio.cutout, "Window"), (float)w, (float)h);
-	for (int n = 0; n < d->sprites; n++) {
-		const DioramaSprite *s = &d->sprite[order[n]];
-		double mid = (s->x0 + s->x1) / 2, u = mid - phase * s->dx, v = s->y1 - phase * s->dy;
-		double fx, fy, ax, ay, bx, by;
-		project(camera, u, v, &fx, &fy);
-		project(camera, u - 0.5, v, &ax, &ay);
-		project(camera, u + 0.5, v, &bx, &by);
-		double k = bx - ax;
-		glUniform4f(glGetUniformLocation(dio.cutout, "Rect"), (float)(fx + (s->x0 - mid) * k), (float)fy,
-			(float)(fx + (s->x1 - mid) * k), (float)(fy + (s->y1 - s->y0) * k));
-		glUniform4f(glGetUniformLocation(dio.cutout, "Box"), s->x0, s->y0, s->x1, s->y1);
-		glUniform1i(glGetUniformLocation(dio.cutout, "Id"), order[n] + 1);
-		glUniform1f(glGetUniformLocation(dio.cutout, "Blur"), focus_blur((float)v, focus));
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-	}
-
-	double fit_w = (box[2] - box[0]) / 256, fit_h = (box[3] - box[1]) / board_h;
-	int flat = (int)(fit_w < fit_h ? fit_w : fit_h);
-	flat = flat < 1 ? 1 : flat;
-	glViewport((int)((box[0] + box[2]) / 2) - 128 * flat, (int)((box[1] + box[3] - board_h * flat) / 2), 256 * flat, (int)board_h * flat);
-	glUseProgram(dio.flat);
-	glUniform1i(glGetUniformLocation(dio.flat, "Picture"), 0);
-	glUniform1i(glGetUniformLocation(dio.flat, "Ids"), 2);
-	glUniform1i(glGetUniformLocation(dio.flat, "Scale"), scale);
-	glUniform2f(glGetUniformLocation(dio.flat, "Board"), 256, board_h);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-	float radius = 0.009f * h;
-	glBindTexture(GL_TEXTURE_2D, dio.scene);
-	glGenerateMipmap(GL_TEXTURE_2D);
-	glViewport(0, 0, w / 4 > 0 ? w / 4 : 1, h / 4 > 0 ? h / 4 : 1);
-	glBindFramebuffer(GL_FRAMEBUFFER, dio.blurred_fbo);
-	glUseProgram(dio.gather);
-	glUniform1i(glGetUniformLocation(dio.gather, "Scene"), 0);
-	glUniform1f(glGetUniformLocation(dio.gather, "Radius"), radius / 4);
-	glUniform3fv(glGetUniformLocation(dio.gather, "Taps"), FOCUS_TAPS, dio.taps);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-	if (to_window)
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	else
-		bind_warm_target(w, h);
-	glViewport(0, 0, w, h);
-	glUseProgram(dio.focus);
-	glBindTexture(GL_TEXTURE_2D, dio.scene);
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, dio.blurred);
-	glActiveTexture(GL_TEXTURE0);
-	glUniform1i(glGetUniformLocation(dio.focus, "Scene"), 0);
-	glUniform1i(glGetUniformLocation(dio.focus, "Blurred"), 1);
-	glUniform1f(glGetUniformLocation(dio.focus, "Radius"), radius);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-void video_diorama(const Diorama *layers)
-{
-	dio.has = layers != NULL;
-	if (!layers)
-		return;
-	memcpy(&dio.layers, layers, sizeof dio.layers);
-	glBindTexture(GL_TEXTURE_2D, dio.under);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, (GLsizei)layers->height, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, layers->under);
-	glBindTexture(GL_TEXTURE_2D, dio.ids);
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 256, (GLsizei)layers->height, 0, GL_RED, GL_UNSIGNED_BYTE, layers->id);
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-}
-
-void video_diorama_phase(float phase)
-{
-	dio.phase = phase;
-}
-
-bool video_diorama_on(void)
-{
-	return profiles[current].diorama && profiles[current].ready;
-}
-
 static void present(bool swap, bool to_window)
 {
 	if (!source_w)
@@ -741,10 +391,7 @@ static void present(bool swap, bool to_window)
 
 	GLuint input = source;
 	int in_w = width, in_h = height;
-	bool diorama = p->diorama && dio.has && width % 256 == 0 && height == dio.layers.height * (width / 256);
-	if (diorama)
-		draw_diorama(w, h, to_window);
-	for (int i = 0; i < p->count && !diorama; i++) {
+	for (int i = 0; i < p->count; i++) {
 		const Pass *pass = &p->passes[i];
 		set_filter(input, pass->linear);
 		if (pass->to_screen) {
@@ -785,7 +432,6 @@ static void present(bool swap, bool to_window)
 		write_capture(w, h);
 		capture_path[0] = 0;
 	}
-	dio.phase = 0;
 	if (!to_window) {
 		glFinish();
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);

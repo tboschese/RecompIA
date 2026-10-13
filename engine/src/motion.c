@@ -73,17 +73,19 @@ static int wrap(int delta, int range)
 	return delta >= range / 2 ? delta - range : delta;
 }
 
-void motion_match_objects(const CoreObject *a, const CoreObject *b, uint8_t *match)
+/* Which object of `b` each object of `a` became: same palette and size, closest position,
+ * preferring the same tile and the same OAM slot. */
+static void match_objects(const CoreMotion *a, const CoreMotion *b, uint8_t *match)
 {
 	for (int i = 0; i < 128; i++) {
 		int best = NO_MATCH, best_score = 1 << 30;
 		for (int j = 0; j < 128; j++) {
-			if (b[j].size != a[i].size || (b[j].attributes & 0x0f) != (a[i].attributes & 0x0f))
+			if (b->objects[j].size != a->objects[i].size || (b->objects[j].attributes & 0x0f) != (a->objects[i].attributes & 0x0f))
 				continue;
-			int dx = wrap(b[j].x - a[i].x, 512), dy = wrap(b[j].y - a[i].y, 256);
+			int dx = wrap(b->objects[j].x - a->objects[i].x, 512), dy = wrap(b->objects[j].y - a->objects[i].y, 256);
 			if (abs(dx) > MAX_STEP || abs(dy) > MAX_STEP)
 				continue;
-			int score = (abs(dx) + abs(dy)) * 4 + (b[j].character != a[i].character ? 16 : 0) + (j != i);
+			int score = (abs(dx) + abs(dy)) * 4 + (b->objects[j].character != a->objects[i].character ? 16 : 0) + (j != i);
 			if (score < best_score)
 				best = j, best_score = score;
 		}
@@ -267,8 +269,8 @@ const uint32_t *motion_between(unsigned *width, unsigned *height)
 		return NULL;
 
 	uint8_t forward[128], backward[128];
-	motion_match_objects(old->motion.objects, now->motion.objects, forward);
-	motion_match_objects(now->motion.objects, old->motion.objects, backward);
+	match_objects(&old->motion, &now->motion, forward);
+	match_objects(&now->motion, &old->motion, backward);
 
 	int scale;
 	if (old->has_hd && now->has_hd) {
