@@ -111,7 +111,7 @@ def sweep(game: Path, rom: Path, minutes: float, workers: int = 8, frames: int =
     known = set(known_path.read_text().split()) if known_path.exists() else set()
     catalog = [line.split("\t") for line in tiles_path.read_text().splitlines()] if tiles_path.exists() else []
     tiles_total = len(catalog)
-    scenery_total = sum(row[4] != "4" and row[5] == "1" for row in catalog)
+    scenery_total = sum(len(row) > 5 and row[4] != "4" and row[5] == "1" for row in catalog)
     del catalog
 
     engine, core = tracer.engine_path(), cores.core_path(app.get("core", "snes9x"))

@@ -89,8 +89,39 @@ unsigned explore_buttons(long frame)
 	static long span_end;
 	static unsigned held, tapped;
 	(void)frame;
+	/* A special move is a motion then a button (a quarter circle, back then forward, down
+	 * twice), a few frames each. Random spans almost never draw one, and a spell, a fireball
+	 * or a burst only shows when one is drawn. Forward is either side. */
+	static unsigned motion[8];
+	static int motion_len, motion_at;
 	if (watch)
 		return 0;
+	if (motion_at < motion_len) {
+		unsigned b = motion[motion_at / 4 < 8 ? motion_at / 4 : 7];
+		motion_at++;
+		return b;
+	}
+	if (frames >= span_end && next() % 100 < 15) {
+		unsigned fw = 1u << (next() & 1 ? BTN_RIGHT : BTN_LEFT);
+		unsigned bk = fw == 1u << BTN_RIGHT ? 1u << BTN_LEFT : 1u << BTN_RIGHT;
+		unsigned dn = 1u << BTN_DOWN, up = 1u << BTN_UP;
+		static const int actions[4] = { BTN_A, BTN_B, BTN_X, BTN_Y };
+		unsigned hit = 1u << actions[next() % 4];
+		const unsigned shapes[7][4] = {
+			{ dn, dn | fw, fw, hit }, { dn, dn | bk, bk, hit }, { bk, fw, hit, 0 }, { fw, fw, hit, 0 },
+			{ bk, bk, hit, 0 }, { dn, dn, hit, 0 }, { dn, up, hit, 0 },
+		};
+		const unsigned *s = shapes[next() % 7];
+		motion_len = 0;
+		for (int i = 0; i < 4 && s[i]; i++) {
+			motion[i * 2] = s[i];
+			motion[i * 2 + 1] = i + 1 < 4 && s[i + 1] ? 0 : s[i];
+			motion_len = (i * 2 + 2) * 4;
+		}
+		motion_at = 0;
+		span_end = frames + motion_len;
+		return explore_buttons(frame);
+	}
 	if (frames >= span_end) {
 		span_end = frames + 6 + (long)(next() % 50);
 		held = tapped = 0;

@@ -37,6 +37,18 @@ def main() -> int:
     nw.add_argument("rom", type=Path)
     nw.add_argument("--minutes", type=float, default=30, help="tempo máximo da varredura (padrão: 30)")
     nw.add_argument("--seeds", type=Path, nargs="*", default=[], help="estados de quem jogou, como na varredura")
+    sh = sub.add_parser("shots", help="antes e depois do remaster em cenas da varredura, com o tempo de cada uma")
+    sh.add_argument("game", type=Path)
+    sh.add_argument("rom", type=Path)
+    sh.add_argument("--count", type=int, default=48, help="cenas (padrão: 48)")
+    sh.add_argument("--scale", type=int, default=8, help="escala do remaster, a da tela do app (padrão: 8)")
+    sh.add_argument("--cells", nargs="*", default=None, help="cenas da varredura pelo nome (c00123…)")
+    sh.add_argument("--no-lights", action="store_true", help="sem a lista de luzes do jogo")
+    sh.add_argument("--engine", type=Path, help="outro motor, para comparar (padrão: o desta árvore)")
+    sh.add_argument("--workers", type=int, default=4, help="cenas em paralelo; 1 para medir o tempo sem disputa (padrão: 4)")
+    sh.add_argument("--frames", type=int, default=40, help="quadros jogados de cada cena; a foto é o último (padrão: 40)")
+    sh.add_argument("--press", help='botões a partir da cena, como "D*4 -*2 R*4 B*4": um golpe especial, uma magia')
+    sh.add_argument("--debug", action="store_true", help="as luzes de cada quadro em <cena>.log")
     sw = sub.add_parser("sweep", help="o motor joga sozinho até ver o jogo todo: um catálogo de cada tile e de cada cena")
     sw.add_argument("game", type=Path)
     sw.add_argument("rom", type=Path)
@@ -92,6 +104,14 @@ def main() -> int:
             print(f"luzes: {added} grupos, {pending} a decidir\n  revise: open \"{page}\"\n"
                   f"  decida: remasteria lights decide {game} 1=glow 2=none …\n"
                   f"  gere o app: remasteria mac {game} \"{args.rom}\"")
+        elif args.command == "shots":
+            from . import shots
+
+            cells = args.cells or shots.pick(args.game, args.count)
+            result = shots.shots(args.game, args.rom, cells, args.scale, args.frames, workers=args.workers, lights=not args.no_lights, engine=args.engine,
+                                  debug=args.debug, press=args.press)
+            print(f"{result['scenes']} cenas em {result['run']}: remaster {result['mean']:.2f} ms em média"
+                  + (f", pior {result['worst'][1][1]:.2f} ms ({result['worst'][0]})" if result["worst"] else ""))
         elif args.command == "sweep":
             from . import sweep
 

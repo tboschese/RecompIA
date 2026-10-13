@@ -21,7 +21,9 @@
  * $REMASTERIA_LIGHT_CAPTURE (a folder) for the lights. Headless with $REMASTERIA_EXPLORE (a folder)
  * is one run of the sweep (explore.c), from $REMASTERIA_EXPLORE_FROM (a state) or power-on, with
  * the keys in $REMASTERIA_EXPLORE_KNOWN already found and $REMASTERIA_EXPLORE_SEED for the input.
- * Headless with $REMASTERIA_HEADLESS_FROM (a state) plays on from it with no input.
+ * Headless with $REMASTERIA_HEADLESS_FROM (a state) plays on from it with no input; with
+ * $REMASTERIA_SHOT (a .ppm) too, it saves the remaster of the last frame at $REMASTERIA_SHOT_SCALE
+ * (4 by default), the console's at $REMASTERIA_SHOT_SRC, and prints the remaster's time.
  *
  * Saves (cartridge battery, resume point, state slots), control bindings and the execution trace
  * live in DATA_DIR, by default ~/Library/Application Support/RemasterIA/<title>/.
@@ -111,7 +113,17 @@ static float aspect = 4.0f / 3.0f;
 static SDL_AudioDeviceID audio;
 static int headless_button = BTN_START;
 static unsigned explore_held;
+/* Buttons played from a state for a test (REMASTERIA_HEADLESS_PRESS), such as a special move. */
+static bool press_on;
+static unsigned press_held;
 static bool explore_due;
+/* Headless shot: the remaster of a scene, without a window (tools/remasteria shots). The last
+ * frames are remastered so lights that stay a while are lit, and timed. */
+#define SHOT_FRAMES 30
+static const char *shot_path;
+static long shot_left;
+static double shot_ms, shot_ms_max;
+static int shot_count;
 static char lights_file[PATH], light_dir[PATH];
 static bool light_capture;
 static bool fast_forward, quit, headless_start, smooth_motion = true, art_capture, remaster_on;
@@ -255,7 +267,7 @@ static unsigned console_copy_w, console_copy_h;
 /* Keeps the latest console picture so the capture frame can be saved beside the remaster. */
 static void stash_console(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-	if (pixel_format != VIDEO_XRGB8888 || (!getenv("REMASTERIA_CAPTURE") && !light_dir[0] && !explore_on()) || !data
+	if (pixel_format != VIDEO_XRGB8888 || (!getenv("REMASTERIA_CAPTURE") && !light_dir[0] && !explore_on() && !shot_path) || !data
 		|| width == 0 || width > 512 || height == 0 || height > 480)
 		return;
 	if (pitch < width * sizeof(uint32_t))
@@ -381,6 +393,37 @@ static void video(const void *data, unsigned width, unsigned height, size_t pitc
 	}
 	if (!video_ready) {
 		stash_console(data, width, height, pitch);
+		if (tiles && shot_path && shot_left <= SHOT_FRAMES) {
+			struct timespec t0, t1;
+			clock_gettime(CLOCK_MONOTONIC, &t0);
+			unsigned w, h;
+			const uint32_t *hd = remaster_frame(data, pitch, height, m, &w, &h);
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			double ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+			if (hd) {
+				shot_ms += ms;
+				shot_ms_max = ms > shot_ms_max ? ms : shot_ms_max;
+				shot_count++;
+			}
+			if (hd && shot_left == 1) {
+				FILE *f = fopen(shot_path, "wb");
+				if (f) {
+					fprintf(f, "P6\n%u %u\n255\n", w, h);
+					unsigned char *row = malloc((size_t)w * 3);
+					for (unsigned y = 0; row && y < h; y++) {
+						for (unsigned x = 0; x < w; x++) {
+							uint32_t p = hd[(size_t)y * w + x];
+							row[x * 3] = (unsigned char)(p >> 16);
+							row[x * 3 + 1] = (unsigned char)(p >> 8);
+							row[x * 3 + 2] = (unsigned char)p;
+						}
+						fwrite(row, 1, (size_t)w * 3, f);
+					}
+					free(row);
+					fclose(f);
+				}
+			}
+		}
 		if (tiles && light_dir[0]) {
 			unsigned w, h;
 			if (remaster_frame(data, pitch, height, m, &w, &h))
@@ -480,6 +523,30 @@ static void audio_sample(int16_t left, int16_t right)
 
 static void input_poll(void) {}
 
+/* "D*4 -*2 DR*4 R*4 B*4 -*60": the buttons held (U D L R A B X Y l r S for Start, - for none)
+ * and for how many frames. The buttons held on frame `at`, 0 once the script is over. */
+static unsigned press_script(const char *script, long at)
+{
+	long t = 0;
+	while (script && *script) {
+		while (*script == ' ')
+			script++;
+		unsigned held = 0;
+		for (; *script && *script != '*' && *script != ' '; script++) {
+			const char *keys = "UDLRABXYlrS";
+			static const int ids[] = { BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_X, BTN_Y, BTN_L, BTN_R, BTN_START };
+			const char *k = strchr(keys, *script);
+			if (k && *script)
+				held |= 1u << ids[k - keys];
+		}
+		long n = *script == '*' ? strtol(script + 1, (char **)&script, 10) : 1;
+		if (at < t + n)
+			return held;
+		t += n;
+	}
+	return 0;
+}
+
 static int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
 {
 	(void)index;
@@ -487,6 +554,8 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index, unsig
 		return 0;
 	if (explore_on())
 		return port == 0 && (explore_held >> id & 1);
+	if (press_on)
+		return port == 0 && (press_held >> id & 1);
 	if (headless_start)
 		return port == 0 && (int)id == headless_button;
 	return input_down((int)port, (int)id);
@@ -940,9 +1009,16 @@ int main(int argc, char **argv)
 				fail("não consegui carregar o estado");
 			idle = true;
 		}
+		shot_path = getenv("REMASTERIA_SHOT");
+		if (shot_path)
+			remaster_use_scale(getenv("REMASTERIA_SHOT_SCALE") ? atoi(getenv("REMASTERIA_SHOT_SCALE")) : 4);
+		const char *press = getenv("REMASTERIA_HEADLESS_PRESS");
+		press_on = press != NULL;
 		for (long i = 0; i < headless_frames; i++) {
+			press_held = press_script(press, i);
 			headless_start = !idle && i % 120 < 4;
 			headless_button = press_a && i >= 600 ? BTN_A : BTN_START;
+			shot_left = headless_frames - i;
 			core.run();
 			if (survey && every > 0 && i % every == every - 1) {
 				char path[PATH + 32];
@@ -952,6 +1028,19 @@ int main(int argc, char **argv)
 				save_state(path);
 			}
 		}
+		if (shot_path && getenv("REMASTERIA_SHOT_SRC"))
+			write_console_to(getenv("REMASTERIA_SHOT_SRC"));
+		const CoreMotion *shot_m = core_motion ? core_motion() : NULL;
+		FILE *layers = shot_path && getenv("REMASTERIA_SHOT_LAYERS") && shot_m ? fopen(getenv("REMASTERIA_SHOT_LAYERS"), "wb") : NULL;
+		if (layers) {
+			/* The layer of each pixel of the last frame (0-3 BG, 4-5 OBJ, 6 backdrop), a PGM. */
+			fprintf(layers, "P5\n256 %u\n255\n", console_copy_h);
+			for (unsigned y = 0; y < console_copy_h; y++)
+				fwrite(shot_m->source[y + shot_m->top], 1, 256, layers);
+			fclose(layers);
+		}
+		if (shot_count)
+			printf("remaster %.2f ms (máximo %.2f ms)\n", shot_ms / shot_count, shot_ms_max);
 		save_battery(battery_path);
 		hdpack_capture_save();
 		core.unload_game();

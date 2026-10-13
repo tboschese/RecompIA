@@ -236,20 +236,20 @@ cdf1e365d6fb4475  none    197   189 239 255 -
 b536d24ee138028d  none    197   189 239 255 -
 
 ## 37 85,59-115,76 sugestão glow /tmp/remasteria-luzes/1791856806-0006985.ppm
-11786483e37ad1e7  glow    197   255 238 138 -
-20fb418c3f93791f  glow    197   255 238 138 -
-38deb14460380dd7  glow    197   255 238 138 -
-4383de489e5d293c  glow    197   255 238 138 -
-4badaa1e3bfebbae  glow    197   255 238 138 -
-4f812944ff776914  glow    197   255 238 138 -
-5a21141cb636b0f2  glow    197   255 238 138 -
-5ed538f46b92134e  glow    197   255 238 138 -
-9a199f42c190c190  glow    197   255 238 138 -
-a782fe8bcdf5ffdd  glow    197   255 238 138 -
-b6eb587fccf93e9d  glow    197   255 238 138 -
-bae23a5de4c5e2e4  glow    197   255 238 138 -
-d1d1c3868525b754  glow    197   255 238 138 -
-d48cfc75d3198f71  glow    197   255 238 138 -
+11786483e37ad1e7  none    197  255  238  138  -
+20fb418c3f93791f  none    197  255  238  138  -
+38deb14460380dd7  none    197  255  238  138  -
+4383de489e5d293c  none    197  255  238  138  -
+4badaa1e3bfebbae  none    197  255  238  138  -
+4f812944ff776914  none    197  255  238  138  -
+5a21141cb636b0f2  none    197  255  238  138  -
+5ed538f46b92134e  none    197  255  238  138  -
+9a199f42c190c190  none    197  255  238  138  -
+a782fe8bcdf5ffdd  none    197  255  238  138  -
+b6eb587fccf93e9d  none    197  255  238  138  -
+bae23a5de4c5e2e4  none    197  255  238  138  -
+d1d1c3868525b754  none    197  255  238  138  -
+d48cfc75d3198f71  none    197  255  238  138  -
 
 ## 38 77,0-178,7 sugestão glow /tmp/remasteria-luzes/1791856806-0006986.ppm
 0a94b0ef42537e0a  none    197   187 236 255 -
@@ -264,21 +264,21 @@ ef8fb58b730d8cde  none    197   187 236 255 -
 fb638e78039d15ae  none    197   187 236 255 -
 
 ## 39 53,58-64,67 sugestão glow /tmp/remasteria-luzes/1791856806-0006986.ppm
-30b0f0525d1499ee  glow    197   255 237 138 -
-8ca543e5b690ffb9  glow    197   255 237 138 -
-d103aff56f89242f  glow    197   255 237 138 -
-d15f2c89e9b4bd16  glow    197   255 237 138 -
-ed2c38113f09c625  glow    197   255 237 138 -
+30b0f0525d1499ee  none    197  255  237  138  -
+8ca543e5b690ffb9  none    197  255  237  138  -
+d103aff56f89242f  none    197  255  237  138  -
+d15f2c89e9b4bd16  none    197  255  237  138  -
+ed2c38113f09c625  none    197  255  237  138  -
 
 ## 40 107,58-148,62 sugestão glow /tmp/remasteria-luzes/1791856806-0006986.ppm
-72c350592fae0d8a  glow    197   255 251 144 -
-e553f2843dc3af97  glow    197   255 251 144 -
-fddd5e16e6da39fe  glow    197   255 251 144 -
+72c350592fae0d8a  none    197  255  251  144  -
+e553f2843dc3af97  none    197  255  251  144  -
+fddd5e16e6da39fe  none    197  255  251  144  -
 
 ## 41 76,64-88,72 sugestão glow /tmp/remasteria-luzes/1791856806-0006986.ppm
-075c82992f60ff10  glow    197   255 236 138 -
-12146c1ab6ec655d  glow    197   255 236 138 -
-f4a58d7ccecafa73  glow    197   255 236 138 -
+075c82992f60ff10  none    197  255  236  138  -
+12146c1ab6ec655d  none    197  255  236  138  -
+f4a58d7ccecafa73  none    197  255  236  138  -
 
 ## 42 92,0-163,7 sugestão glow /tmp/remasteria-luzes/1791856806-0006987.ppm
 5dbcfb3c339157e6  none    197   187 236 255 -
@@ -295,17 +295,17 @@ ca4b6ffde59a580d  none    197   187 236 255 -
 74f4ef0d204916b4  none    197   187 236 255 -
 
 ## 44 73,57-82,78 sugestão glow /tmp/remasteria-luzes/1791856806-0006987.ppm
-416160bedd2d5f98  glow    197   255 240 139 -
-5c0e0b2875829135  glow    197   255 240 139 -
-797c2e5fa7715bbf  glow    197   255 240 139 -
-db2724171a040965  glow    197   255 240 139 -
+416160bedd2d5f98  none    197  255  240  139  -
+5c0e0b2875829135  none    197  255  240  139  -
+797c2e5fa7715bbf  none    197  255  240  139  -
+db2724171a040965  none    197  255  240  139  -
 
 ## 45 85,57-170,74 sugestão glow /tmp/remasteria-luzes/1791856806-0006987.ppm
-0ec85a97f3ba0ba0  glow    197   255 239 138 -
-cd2329f00e174c20  glow    197   255 239 138 -
+0ec85a97f3ba0ba0  none    197  255  239  138  -
+cd2329f00e174c20  none    197  255  239  138  -
 
 ## 46 50,64-64,79 sugestão glow /tmp/remasteria-luzes/1791856806-0006987.ppm
-1d083215857043f5  glow    197   255 236 138 -
+1d083215857043f5  none    197  255  236  138  -
 
 ## 47 109,5-146,7 sugestão glow /tmp/remasteria-luzes/1791856806-0006988.ppm
 0689f350303c8ece  none    197   187 236 255 -
@@ -313,86 +313,86 @@ cd2329f00e174c20  glow    197   255 239 138 -
 bbde94d924b53e6b  none    197   187 236 255 -
 
 ## 48 84,56-171,81 sugestão glow /tmp/remasteria-luzes/1791856806-0006988.ppm
-02d8257d1408df5a  glow    197   255 239 138 -
-8694edb10f6d796c  glow    197   255 239 138 -
-e8c6fb3f7c7a6561  glow    197   255 239 138 -
-f63749656fa44935  glow    197   255 239 138 -
+02d8257d1408df5a  none    197  255  239  138  -
+8694edb10f6d796c  none    197  255  239  138  -
+e8c6fb3f7c7a6561  none    197  255  239  138  -
+f63749656fa44935  none    197  255  239  138  -
 
 ## 49 73,62-82,81 sugestão glow /tmp/remasteria-luzes/1791856806-0006988.ppm
-842f3c2484a1dd97  glow    197   255 239 138 -
+842f3c2484a1dd97  none    197  255  239  138  -
 
 ## 50 61,56-73,69 sugestão glow /tmp/remasteria-luzes/1791856806-0006990.ppm
-12b3edd0aec0f7b5  glow    197   255 236 138 -
-25796f8c8c56ef4c  glow    197   255 236 138 -
-3e647fc933664471  glow    197   255 236 138 -
-8f99edc2e41dea3f  glow    197   255 236 138 -
-e7ef201d6395ed85  glow    197   255 236 138 -
-f5413e42782ff481  glow    197   255 236 138 -
+12b3edd0aec0f7b5  none    197  255  236  138  -
+25796f8c8c56ef4c  none    197  255  236  138  -
+3e647fc933664471  none    197  255  236  138  -
+8f99edc2e41dea3f  none    197  255  236  138  -
+e7ef201d6395ed85  none    197  255  236  138  -
+f5413e42782ff481  none    197  255  236  138  -
 
 ## 51 75,56-100,79 sugestão glow /tmp/remasteria-luzes/1791856806-0006990.ppm
-e84d5c5fa7905da9  glow    197   255 237 138 -
+e84d5c5fa7905da9  none    197  255  237  138  -
 
 ## 52 99,56-156,79 sugestão glow /tmp/remasteria-luzes/1791856806-0006990.ppm
-b2e31545ac836f1e  glow    197   255 238 138 -
+b2e31545ac836f1e  none    197  255  238  138  -
 
 ## 53 78,56-177,77 sugestão glow /tmp/remasteria-luzes/1791856806-0006992.ppm
-67cb1e8ef5ae4d8c  glow    197   255 239 138 -
+67cb1e8ef5ae4d8c  none    197  255  239  138  -
 
 ## 54 20,149-48,175 sugestão glow /tmp/remasteria-luzes/1791856806-0007002.ppm
-0b6462e1ad19d72e  glow    255   255 255 255 -
-1006b152c3045f9c  glow    255   255 255 255 -
-2c2f04eb2c61fb1c  glow    255   255 255 255 -
-2e80af95d7ddfec5  glow    255   255 255 255 -
-3b88afb9ff319316  glow    255   255 255 255 -
-3bc46f51617ce372  glow    255   255 255 255 -
-412083608186ca60  glow    255   255 255 255 -
-4221c53c859b71cd  glow    255   255 255 255 -
-6efb96d2ee0b1b6e  glow    255   255 255 255 -
-a7b57b12fb29cfe5  glow    255   255 255 255 -
-b166790329ef1ed8  glow    255   255 255 255 -
-d4db6b93f709eb67  glow    255   255 255 255 -
-eece4b6d0d07507e  glow    255   255 255 255 -
+0b6462e1ad19d72e  none    255  255  255  255  -
+1006b152c3045f9c  none    255  255  255  255  -
+2c2f04eb2c61fb1c  none    255  255  255  255  -
+2e80af95d7ddfec5  none    255  255  255  255  -
+3b88afb9ff319316  none    255  255  255  255  -
+3bc46f51617ce372  none    255  255  255  255  -
+412083608186ca60  none    255  255  255  255  -
+4221c53c859b71cd  none    255  255  255  255  -
+6efb96d2ee0b1b6e  none    255  255  255  255  -
+a7b57b12fb29cfe5  none    255  255  255  255  -
+b166790329ef1ed8  none    255  255  255  255  -
+d4db6b93f709eb67  none    255  255  255  255  -
+eece4b6d0d07507e  none    255  255  255  255  -
 
 ## 55 39,70-47,79 sugestão glow /tmp/remasteria-luzes/1791856806-0007037.ppm
-118f2e1e691d43e4  glow    197   187 255 138 -
-4d8d04cf836d4ac4  glow    197   187 255 138 -
+118f2e1e691d43e4  none    197  187  255  138  -
+4d8d04cf836d4ac4  none    197  187  255  138  -
 
 ## 56 148,68-171,88 sugestão glow /tmp/remasteria-luzes/1791856806-0007093.ppm
-182afa437a548b0e  glow    255   255 255 255 -
-1859c6aca70ebac6  glow    255   255 255 255 -
-756bbe8fc1e6f0d1  glow    255   255 255 255 -
-930511d066a6897e  glow    255   255 255 255 -
-946371a260106820  glow    255   255 255 255 -
-ab50132f28541d32  glow    255   255 255 255 -
-d3212b5b456c3896  glow    255   255 255 255 -
-e1b4ab27f4285b23  glow    255   255 255 255 -
-ea45d1a844ed9b2b  glow    255   255 255 255 -
+182afa437a548b0e  none    255  255  255  255  -
+1859c6aca70ebac6  none    255  255  255  255  -
+756bbe8fc1e6f0d1  none    255  255  255  255  -
+930511d066a6897e  none    255  255  255  255  -
+946371a260106820  none    255  255  255  255  -
+ab50132f28541d32  none    255  255  255  255  -
+d3212b5b456c3896  none    255  255  255  255  -
+e1b4ab27f4285b23  none    255  255  255  255  -
+ea45d1a844ed9b2b  none    255  255  255  255  -
 
 ## 57 105,83-121,97 sugestão glow /tmp/remasteria-luzes/1791856806-0007103.ppm
-067f6cacb257d8aa  glow    255   255 255 255 -
-0e67a2ec0bbae831  glow    255   255 255 255 -
-5ce394f5044ee587  glow    255   255 255 255 -
-5e18943e3b84ede3  glow    255   255 255 255 -
-b97d71875eb15e75  glow    255   255 255 255 -
+067f6cacb257d8aa  none    255  255  255  255  -
+0e67a2ec0bbae831  none    255  255  255  255  -
+5ce394f5044ee587  none    255  255  255  255  -
+5e18943e3b84ede3  none    255  255  255  255  -
+b97d71875eb15e75  none    255  255  255  255  -
 
 ## 58 105,79-123,97 sugestão glow /tmp/remasteria-luzes/1791856806-0007104.ppm
-1599effcfcf48a3a  glow    255   255 255 255 -
-32b71ffb75f3db34  glow    255   255 255 255 -
-4350f23e111fb823  glow    255   255 255 255 -
+1599effcfcf48a3a  none    255  255  255  255  -
+32b71ffb75f3db34  none    255  255  255  255  -
+4350f23e111fb823  none    255  255  255  255  -
 
 ## 59 124,82-133,91 sugestão glow /tmp/remasteria-luzes/1791856806-0007104.ppm
-1b44cd7cf33aca74  glow    255   255 255 255 -
-df406e363fdf6cde  glow    255   255 255 255 -
+1b44cd7cf33aca74  none    255  255  255  255  -
+df406e363fdf6cde  none    255  255  255  255  -
 
 ## 60 105,75-123,97 sugestão glow /tmp/remasteria-luzes/1791856806-0007105.ppm
-134255ccffd8b24b  glow    255   255 255 255 -
-775595ba23e5d732  glow    255   255 255 255 -
+134255ccffd8b24b  none    255  255  255  255  -
+775595ba23e5d732  none    255  255  255  255  -
 
 ## 61 105,71-133,97 sugestão glow /tmp/remasteria-luzes/1791856806-0007106.ppm
-bc0c4df9bf8f8aac  glow    255   255 255 255 -
+bc0c4df9bf8f8aac  none    255  255  255  255  -
 
 ## 62 105,68-133,97 sugestão glow /tmp/remasteria-luzes/1791856806-0007108.ppm
-05e31c2e7a15e5aa  glow    255   255 255 255 -
+05e31c2e7a15e5aa  none    255  255  255  255  -
 
 ## 63 133,202-154,216 sugestão window /tmp/remasteria-luzes/1791856806-0009171.ppm
 0424a73e62b30cc3  glow    253   255 255 243 -
