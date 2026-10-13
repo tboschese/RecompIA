@@ -12,7 +12,7 @@
 #define REPEAT_RATE 5
 
 enum { SCREEN_MAIN, SCREEN_SAVE, SCREEN_LOAD, SCREEN_CONTROLS };
-enum { ITEM_CONTINUE, ITEM_SAVE, ITEM_LOAD, ITEM_CONTROLS, ITEM_LOOK, ITEM_MOTION, ITEM_FULLSCREEN, ITEM_QUIT, MAIN_ITEMS };
+enum { ITEM_CONTINUE, ITEM_SAVE, ITEM_LOAD, ITEM_CONTROLS, ITEM_LOOK, ITEM_MOTION, ITEM_FULLSCREEN, ITEM_RESET, ITEM_QUIT, MAIN_ITEMS };
 #define CONTROL_ITEMS (BUTTONS + 2)
 
 typedef struct {
@@ -30,6 +30,7 @@ static Slot slots[SLOTS];
 static char toast[128];
 static Uint32 toast_until;
 static int held, held_frames;
+static bool reset_armed;
 
 static const uint32_t TEXT = 0xFFF0F0F0, DIM = 0xFF9090A0, GOLD = 0xFF40D8FF, SHADOW = 0xC0000000;
 
@@ -111,6 +112,7 @@ void menu_open(void)
 	open = true;
 	screen = SCREEN_MAIN;
 	cursor[SCREEN_MAIN] = ITEM_CONTINUE;
+	reset_armed = false;
 	input_release_all();
 }
 
@@ -225,6 +227,18 @@ static void choose(void)
 		case ITEM_LOOK: act.next_look(); break;
 		case ITEM_MOTION: act.next_motion(); break;
 		case ITEM_FULLSCREEN: act.fullscreen(); break;
+		case ITEM_RESET:
+			/* A second press within the warning confirms: progress since the last save is lost. */
+			if (reset_armed && SDL_GetTicks() < toast_until) {
+				reset_armed = false;
+				act.reset();
+				menu_close();
+				menu_toast("Jogo reiniciado");
+			} else {
+				reset_armed = true;
+				menu_toast("Aperte de novo para reiniciar");
+			}
+			break;
 		case ITEM_QUIT: act.quit(); break;
 		}
 		break;
@@ -269,9 +283,9 @@ void menu_update(void)
 		return;
 	int n = items();
 	if (step(BTN_UP))
-		cursor[screen] = (cursor[screen] + n - 1) % n;
+		cursor[screen] = (cursor[screen] + n - 1) % n, reset_armed = false;
 	if (step(BTN_DOWN))
-		cursor[screen] = (cursor[screen] + 1) % n;
+		cursor[screen] = (cursor[screen] + 1) % n, reset_armed = false;
 	if (input_pressed_any(BTN_A) || input_pressed_any(BTN_START))
 		choose();
 	else if (input_pressed_any(BTN_B))
@@ -284,7 +298,7 @@ static void draw_main(void)
 	char look[48], motion[48];
 	snprintf(look, sizeof look, "Visual: %s", act.look_name());
 	snprintf(motion, sizeof motion, "Movimento: %s", act.motion_name());
-	const char *labels[MAIN_ITEMS] = { "Continuar", "Salvar estado", "Carregar estado", "Controles", look, motion, "Tela cheia", "Sair do jogo" };
+	const char *labels[MAIN_ITEMS] = { "Continuar", "Salvar estado", "Carregar estado", "Controles", look, motion, "Tela cheia", "Reiniciar jogo", "Sair do jogo" };
 	for (int i = 0; i < MAIN_ITEMS; i++) {
 		bool on = i == cursor[SCREEN_MAIN];
 		if (on)

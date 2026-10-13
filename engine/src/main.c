@@ -86,6 +86,7 @@ static struct {
 	bool (*load_game)(const struct game_info *);
 	void (*unload_game)(void);
 	void (*run)(void);
+	void (*reset)(void);
 	size_t (*serialize_size)(void);
 	bool (*serialize)(void *, size_t);
 	bool (*unserialize)(const void *, size_t);
@@ -678,6 +679,13 @@ static void request_quit(void)
 	quit = true;
 }
 
+/* The console's reset button: the game starts over, the cartridge saves stay. */
+static void reset_game(void)
+{
+	core.reset();
+	motion_reset();
+}
+
 /* Automated visual checks: REMASTERIA_CAPTURE=out.ppm REMASTERIA_CAPTURE_FRAME=N saves frame N and quits;
  * REMASTERIA_CAPTURE_MENU=main|save|load|controls shows that menu screen in the capture. */
 static bool capture_mode(void)
@@ -839,7 +847,7 @@ int main(int argc, char **argv)
 	LOAD(set_audio_sample_batch, "retro_set_audio_sample_batch") LOAD(set_input_poll, "retro_set_input_poll")
 	LOAD(set_input_state, "retro_set_input_state") LOAD(get_system_info, "retro_get_system_info")
 	LOAD(get_system_av_info, "retro_get_system_av_info") LOAD(load_game, "retro_load_game")
-	LOAD(unload_game, "retro_unload_game") LOAD(run, "retro_run") LOAD(serialize_size, "retro_serialize_size")
+	LOAD(unload_game, "retro_unload_game") LOAD(run, "retro_run") LOAD(reset, "retro_reset") LOAD(serialize_size, "retro_serialize_size")
 	LOAD(serialize, "retro_serialize") LOAD(unserialize, "retro_unserialize")
 	LOAD(get_memory_data, "retro_get_memory_data") LOAD(get_memory_size, "retro_get_memory_size")
 	*(void **)&core.trace_save = dlsym(lib, "snesre_trace_save");
@@ -947,7 +955,7 @@ int main(int argc, char **argv)
 	update_title();
 	input_init(data_dir, controller_db[0] ? controller_db : NULL);
 	MenuActions actions = { save_slot, load_slot, slot_info, toggle_fullscreen, next_look, video_profile_name,
-		next_motion, motion_name, request_quit };
+		next_motion, motion_name, reset_game, request_quit };
 	menu_init(&actions, title);
 
 	SDL_AudioSpec want = { 0 }, have;
