@@ -1309,168 +1309,6 @@ static void apply_rows(void *context, int y0, int y1)
 	}
 }
 
-/* MMPX (McGuire and Gagiu, 2021): each pixel becomes 2x2 using only colors already in the
- * picture. Diagonals, 2:1 slopes and curves round off; flat color, single-pixel detail
- * and text keep their shape. Run again to reach 4x and 8x. */
-static uint32_t mmpx_a[MAX_HEIGHT * WIDTH * (REMASTER_SCALE_MAX / 2) * (REMASTER_SCALE_MAX / 2)];
-static uint32_t mmpx_b[MAX_HEIGHT * WIDTH * (REMASTER_SCALE_MAX / 2) * (REMASTER_SCALE_MAX / 2)];
-
-typedef struct {
-	const uint32_t *src;
-	uint32_t *dst;
-	int w, h, factor;
-	size_t dst_stride;
-} MmpxPass;
-
-/* A checkerboard dither is a flat tone, not a field of diagonals. */
-static bool dither[MAX_HEIGHT][WIDTH];
-
-static void find_dither(int h)
-{
-	for (int y = 0; y < h; y++)
-		for (int x = 0; x < WIDTH; x++) {
-			uint32_t e = grid[y][x];
-			int diag = 0, side = 0;
-			for (int k = 0; k < 4; k++) {
-				int dx = k & 1 ? 1 : -1, dy = k & 2 ? 1 : -1;
-				int ox = (k == 0 ? -1 : k == 1 ? 1 : 0), oy = (k == 2 ? -1 : k == 3 ? 1 : 0);
-				int ax = x + dx, ay = y + dy, bx = x + ox, by = y + oy;
-				if (ax >= 0 && ay >= 0 && ax < WIDTH && ay < h && grid[ay][ax] == e)
-					diag++;
-				if (bx >= 0 && by >= 0 && bx < WIDTH && by < h && grid[by][bx] == e)
-					side++;
-			}
-			dither[y][x] = diag >= 3 && side == 0;
-		}
-}
-
-/* Past the first doubling, a shape's edge keeps rounding but a patch of many colors
- * does not, or every speck in it grows into a star. */
-static bool two_colors(uint32_t e, const uint32_t *n, int count)
-{
-	uint32_t other = e;
-	for (int i = 0; i < count; i++) {
-		if (n[i] == e || n[i] == other)
-			continue;
-		if (other != e)
-			return false;
-		other = n[i];
-	}
-	return true;
-}
-
-static int mmpx_luma(uint32_t c)
-{
-	return (int)(c >> 16 & 255) + (int)(c >> 8 & 255) + (int)(c & 255);
-}
-
-static void mmpx_rows(void *context, int y0, int y1)
-{
-	const MmpxPass *p = context;
-	const uint32_t *s = p->src;
-	int w = p->w, h = p->h;
-#define PX(dx, dy) s[(size_t)(y + (dy) < 0 ? 0 : y + (dy) >= h ? h - 1 : y + (dy)) * (size_t)w \
-	+ (size_t)(x + (dx) < 0 ? 0 : x + (dx) >= w ? w - 1 : x + (dx))]
-#define EQ3(b, a0, a1, a2) ((b) == (a0) && (b) == (a1) && (b) == (a2))
-#define EQ4(b, a0, a1, a2, a3) ((b) == (a0) && (b) == (a1) && (b) == (a2) && (b) == (a3))
-#define ANY3(b, a0, a1, a2) ((b) == (a0) || (b) == (a1) || (b) == (a2))
-#define NONE2(b, a0, a1) ((b) != (a0) && (b) != (a1))
-#define NONE4(b, a0, a1, a2, a3) ((b) != (a0) && (b) != (a1) && (b) != (a2) && (b) != (a3))
-	for (int y = y0; y < y1; y++) {
-		uint32_t *out = p->dst + (size_t)(2 * y) * p->dst_stride;
-		const uint32_t *up = s + (size_t)(y > 0 ? y - 1 : 0) * (size_t)w;
-		const uint32_t *mid = s + (size_t)y * (size_t)w;
-		const uint32_t *down = s + (size_t)(y + 1 < h ? y + 1 : h - 1) * (size_t)w;
-		for (int x = 0; x < w; x++) {
-			int xl = x > 0 ? x - 1 : 0, xr = x + 1 < w ? x + 1 : w - 1;
-			uint32_t A = up[xl], B = up[x], C = up[xr];
-			uint32_t D = mid[xl], E = mid[x], F = mid[xr];
-			uint32_t G = down[xl], H = down[x], I = down[xr];
-			if (((A ^ E) | (B ^ E) | (C ^ E) | (D ^ E) | (F ^ E) | (G ^ E) | (H ^ E) | (I ^ E)) == 0) {
-				out[2 * x] = out[2 * x + 1] = out[p->dst_stride + 2 * x] = out[p->dst_stride + 2 * x + 1] = E;
-				continue;
-			}
-			uint32_t J = E, K = E, L = E, M = E;
-			uint32_t around[8] = { A, B, C, D, F, G, H, I };
-			bool keep = dither[y / p->factor][x / p->factor] || (p->factor > 1 && !two_colors(E, around, 8));
-			if (!keep && (A != E || B != E || C != E || D != E || F != E || G != E || H != E || I != E)) {
-				uint32_t P = PX(0, -2), S = PX(0, 2), Q = PX(-2, 0), R = PX(2, 0);
-				int Bl = mmpx_luma(B), Dl = mmpx_luma(D), El = mmpx_luma(E), Fl = mmpx_luma(F), Hl = mmpx_luma(H);
-
-				/* 1:1 slopes */
-				if (D == B && D != H && D != F && (El >= Dl || E == A) && ANY3(E, A, C, G) && (El < Dl || A != D || E != P || E != Q))
-					J = D;
-				if (B == F && B != D && B != H && (El >= Bl || E == C) && ANY3(E, A, C, I) && (El < Bl || C != B || E != P || E != R))
-					K = B;
-				if (H == D && H != F && H != B && (El >= Hl || E == G) && ANY3(E, A, G, I) && (El < Hl || G != H || E != S || E != Q))
-					L = H;
-				if (F == H && F != B && F != D && (El >= Fl || E == I) && ANY3(E, C, G, I) && (El < Fl || I != H || E != R || E != S))
-					M = F;
-
-				/* a line crossing a line */
-				if (E != F && EQ4(E, C, I, D, Q) && F == B && F == H && F != PX(3, 0))
-					K = M = F;
-				if (E != D && EQ4(E, A, G, F, R) && D == B && D == H && D != PX(-3, 0))
-					J = L = D;
-				if (E != H && EQ4(E, G, I, B, P) && H == D && H == F && H != PX(0, 3))
-					L = M = H;
-				if (E != B && EQ4(E, A, C, H, S) && B == D && B == F && B != PX(0, -3))
-					J = K = B;
-
-				/* the tip of a triangle */
-				if (Bl < El && EQ4(E, G, H, I, S) && NONE4(E, A, D, C, F))
-					J = K = B;
-				if (Hl < El && EQ4(E, A, B, C, P) && NONE4(E, D, G, I, F))
-					L = M = H;
-				if (Fl < El && EQ4(E, A, D, G, Q) && NONE4(E, B, C, I, H))
-					K = M = F;
-				if (Dl < El && EQ4(E, C, F, I, R) && NONE4(E, B, A, G, H))
-					J = L = D;
-
-				/* 2:1 slopes */
-				if (H != B) {
-					if (H != A && H != E && H != C) {
-						if (EQ3(H, G, F, R) && NONE2(H, D, PX(2, -1)))
-							L = M;
-						if (EQ3(H, I, D, Q) && NONE2(H, F, PX(-2, -1)))
-							M = L;
-					}
-					if (B != I && B != G && B != E) {
-						if (EQ3(B, A, F, R) && NONE2(B, D, PX(2, 1)))
-							J = K;
-						if (EQ3(B, C, D, Q) && NONE2(B, F, PX(-2, 1)))
-							K = J;
-					}
-				}
-				if (F != D) {
-					if (D != I && D != E && D != C) {
-						if (EQ3(D, A, H, S) && NONE2(D, B, PX(1, 2)))
-							J = L;
-						if (EQ3(D, G, B, P) && NONE2(D, H, PX(1, -2)))
-							L = J;
-					}
-					if (F != E && F != A && F != G) {
-						if (EQ3(F, C, H, S) && NONE2(F, B, PX(-1, 2)))
-							K = M;
-						if (EQ3(F, I, B, P) && NONE2(F, H, PX(-1, -2)))
-							M = K;
-					}
-				}
-			}
-			out[2 * x] = J;
-			out[2 * x + 1] = K;
-			out[p->dst_stride + 2 * x] = L;
-			out[p->dst_stride + 2 * x + 1] = M;
-		}
-	}
-#undef PX
-#undef EQ3
-#undef EQ4
-#undef ANY3
-#undef NONE2
-#undef NONE4
-}
-
 typedef struct {
 	const uint32_t *src;
 	int w, factor;
@@ -1488,26 +1326,11 @@ static void nearest_rows(void *context, int y0, int y1)
 	}
 }
 
-static void mmpx(unsigned out_w)
+/* Each console pixel a square block: the pixel art stays as drawn. */
+static void blocks(unsigned out_w)
 {
-	int h = (int)src_height;
-	for (int y = 0; y < h; y++)
-		memcpy(&mmpx_a[(size_t)y * WIDTH], grid[y], WIDTH * sizeof(uint32_t));
-	find_dither(h);
-	const uint32_t *cur = mmpx_a;
-	int factor = 1;
-	while (factor * 2 <= SCALE) {
-		bool last = factor * 2 == SCALE;
-		uint32_t *dst = last ? image : cur == mmpx_a ? mmpx_b : mmpx_a;
-		MmpxPass p = { cur, dst, WIDTH * factor, h * factor, factor, last ? out_w : (size_t)WIDTH * factor * 2 };
-		remaster_bands(h * factor, mmpx_rows, &p);
-		factor *= 2;
-		cur = dst;
-	}
-	if (factor == SCALE && cur == image)
-		return;
-	Nearest n = { cur, WIDTH * factor, factor, out_w };
-	remaster_bands(h * SCALE, nearest_rows, &n);
+	Nearest n = { &grid[0][0], WIDTH, 1, out_w };
+	remaster_bands((int)src_height * SCALE, nearest_rows, &n);
 }
 
 static int scale_hint;
@@ -1539,7 +1362,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_h = height * SCALE;
 
 	prepare_grid();
-	mmpx(out_w);
+	blocks(out_w);
 
 	memset(shadowed, 0, (size_t)out_w * out_h);
 	for (unsigned y = 0; y + 1 < height; y++) {
