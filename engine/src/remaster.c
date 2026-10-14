@@ -554,16 +554,14 @@ typedef struct {
 static KeyLight key_lights[LIGHT_MAX];
 static int key_count;
 
-static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
+/* The game's own list, by tile: a run of one tile at a time. Before the picture is graded, so
+ * the water is known to every pass. */
+static bool listed_scanned;
+
+static void find_water(int h);
+
+static void scan_listed(const CoreMotion *m, int h)
 {
-	int h = (int)height;
-	find_room(m, h);
-	if (detect_lights)
-		remaster_bands(h, emit_rows, (void *)m);
-	else
-		memset(emits, 0, sizeof emits);
-	/* The game's own list overrides the detection, a run of one tile at a time. listed_at and
-	 * tile_keys are only read where a pixel emits. */
 	static FILE *key_dump;
 	static bool key_dump_tried;
 	if (!key_dump_tried) {
@@ -572,50 +570,67 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 			key_dump = fopen(getenv("REMASTERIA_KEY_DUMP"), "wb");
 	}
 	memset(water, 0, sizeof water);
-	if (listed_count > 0 || finding_lights || key_dump) {
-		hdpack_keys_begin();
-		for (int y = 0; y < h; y++) {
-			int row = y + m->top;
-			const uint16_t *tiles = m->tile[row];
-			const uint8_t *palettes = m->palette[row], *formats = m->format[row];
-			for (int x = 0; x < WIDTH;) {
-				int end = x + 1;
-				while (end < WIDTH && tiles[end] == tiles[x] && palettes[end] == palettes[x] && formats[end] == formats[x])
-					end++;
-				uint64_t key = hdpack_key(m, row, x);
-				int at = listed_find(key);
-				for (; x < end; x++) {
-					if (finding_lights || key_dump)
-						tile_keys[y][x] = key;
-					if (at < 0)
-						continue;
-					if (listed[at].kind == 'a') {
-						water[y][x] = !sprite_pixel(x, y) && !light_window(m, row, x);
-						emits[y][x] = 0;
-						continue;
-					}
-					listed_at[y][x] = (int16_t)at;
-					emits[y][x] = listed[at].kind != 'n' && m->brightness[row] >= 15
-						&& luma_of(m->color[row][x] & 0xffffff) >= listed[at].luma ? 9 : 0;
-				}
+	listed_scanned = listed_count > 0 || finding_lights || key_dump;
+	if (!listed_scanned)
+		return;
+	hdpack_keys_begin();
+	for (int y = 0; y < h; y++) {
+		int row = y + m->top;
+		const uint16_t *tiles = m->tile[row];
+		const uint8_t *palettes = m->palette[row], *formats = m->format[row];
+		for (int x = 0; x < WIDTH;) {
+			int end = x + 1;
+			while (end < WIDTH && tiles[end] == tiles[x] && palettes[end] == palettes[x] && formats[end] == formats[x])
+				end++;
+			uint64_t key = hdpack_key(m, row, x);
+			int at = listed_find(key);
+			for (; x < end; x++) {
+				if (finding_lights || key_dump)
+					tile_keys[y][x] = key;
+				listed_at[y][x] = (int16_t)at;
+				if (at >= 0 && listed[at].kind == 'a')
+					water[y][x] = !sprite_pixel(x, y) && !light_window(m, row, x);
 			}
 		}
-		if (key_dump) {
-			/* for the tools: each frame's tile keys, layers and colors, to name the water by tile */
-			int32_t rows = h;
-			fwrite(&rows, sizeof rows, 1, key_dump);
-			for (int y = 0; y < h; y++)
-				fwrite(tile_keys[y], sizeof(uint64_t), WIDTH, key_dump);
-			for (int y = 0; y < h; y++)
-				fwrite(m->source[y + m->top], 1, WIDTH, key_dump);
-			for (int y = 0; y < h; y++)
-				for (int x = 0; x < WIDTH; x++) {
-					uint32_t c = at_xy(x, y);
-					fwrite(&c, sizeof c, 1, key_dump);
-				}
-			fflush(key_dump);
-		}
 	}
+	find_water(h);
+	if (key_dump) {
+		/* for the tools: each frame's tile keys, layers and colors, to name the water by tile */
+		int32_t rows = h;
+		fwrite(&rows, sizeof rows, 1, key_dump);
+		for (int y = 0; y < h; y++)
+			fwrite(tile_keys[y], sizeof(uint64_t), WIDTH, key_dump);
+		for (int y = 0; y < h; y++)
+			fwrite(m->source[y + m->top], 1, WIDTH, key_dump);
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < WIDTH; x++) {
+				uint32_t c = at_xy(x, y);
+				fwrite(&c, sizeof c, 1, key_dump);
+			}
+		fflush(key_dump);
+	}
+}
+
+static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
+{
+	int h = (int)height;
+	find_room(m, h);
+	if (detect_lights)
+		remaster_bands(h, emit_rows, (void *)m);
+	else
+		memset(emits, 0, sizeof emits);
+	/* The game's own list overrides the detection. */
+	if (listed_scanned)
+		for (int y = 0; y < h; y++) {
+			int row = y + m->top;
+			for (int x = 0; x < WIDTH; x++) {
+				int at = listed_at[y][x];
+				if (at < 0)
+					continue;
+				emits[y][x] = listed[at].kind != 'n' && listed[at].kind != 'a' && m->brightness[row] >= 15
+					&& luma_of(m->color[row][x] & 0xffffff) >= listed[at].luma ? 9 : 0;
+			}
+		}
 	memset(by_light, 0, sizeof by_light);
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < WIDTH; x++)
@@ -1569,8 +1584,65 @@ static void env_tint(int x, int y, int h, int tint[3])
 	}
 }
 
+/* Where the light comes from, as a unit vector on the screen: from above, or toward a fire,
+ * lava or window near enough to outshine the sky. With how warm the light reaching there is
+ * and how near a light it is. Worked out once every KEY_CELL pixels and blended between. */
+#define KEY_CELL 8
+#define KEY_COLS (WIDTH / KEY_CELL + 1)
+#define KEY_ROWS (MAX_HEIGHT / KEY_CELL + 1)
+static float key_field[KEY_ROWS][KEY_COLS][4];  /* direction x, y; warmth 0..256; nearness 0..1 */
+
+static void find_key_field(int h)
+{
+	for (int cy = 0; cy * KEY_CELL <= h + KEY_CELL && cy < KEY_ROWS; cy++)
+		for (int cx = 0; cx < KEY_COLS; cx++) {
+			float x = (float)(cx * KEY_CELL), y = (float)(cy * KEY_CELL);
+			float ax = -0.35f, ay = -0.8f, best = 0.0f, warm = 0.0f, near = 0.0f;
+			for (int i = 0; i < key_count; i++) {
+				float dx = key_lights[i].x - x, dy = key_lights[i].y - y;
+				float d = __builtin_sqrtf(dx * dx + dy * dy);
+				float w = 1.0f - d / (key_lights[i].reach * 1.5f);
+				if (w > best && d > 1.0f) {
+					best = w;
+					ax = -0.35f * (1.0f - w) + dx / d * w;
+					ay = -0.8f * (1.0f - w) + dy / d * w;
+				}
+				float a = 1.0f - d / (key_lights[i].reach * 1.35f);
+				if (a > 0.0f) {
+					near = a > near ? a : near;
+					float wm = a * a * (3.0f - 2.0f * a) * (float)key_lights[i].warmth;
+					warm = wm > warm ? wm : warm;
+				}
+			}
+			float ll = __builtin_sqrtf(ax * ax + ay * ay);
+			key_field[cy][cx][0] = ax / ll, key_field[cy][cx][1] = ay / ll;
+			key_field[cy][cx][2] = warm, key_field[cy][cx][3] = near;
+		}
+}
+
+static void light_at(int x, int y, float out[4])
+{
+	int cx = x / KEY_CELL, cy = y / KEY_CELL;
+	float fx = (float)(x - cx * KEY_CELL) / KEY_CELL, fy = (float)(y - cy * KEY_CELL) / KEY_CELL;
+	cx = cx >= KEY_COLS - 1 ? KEY_COLS - 2 : cx, cy = cy >= KEY_ROWS - 1 ? KEY_ROWS - 2 : cy;
+	for (int k = 0; k < 4; k++)
+		out[k] = (key_field[cy][cx][k] * (1.0f - fx) + key_field[cy][cx + 1][k] * fx) * (1.0f - fy)
+			+ (key_field[cy + 1][cx][k] * (1.0f - fx) + key_field[cy + 1][cx + 1][k] * fx) * fy;
+}
+
+static void key_direction(int x, int y, float *lx, float *ly)
+{
+	float k[4];
+	light_at(x, y, k);
+	float ll = __builtin_sqrtf(k[0] * k[0] + k[1] * k[1]);
+	if (ll < 0.1f)
+		k[0] = -0.35f, k[1] = -0.8f, ll = 0.874f;
+	*lx = k[0] / ll, *ly = k[1] / ll;
+}
+
 static void volume_pass(int h)
 {
+	find_key_field(h);
 	environment(h);
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < WIDTH; x++) {
@@ -1612,20 +1684,9 @@ static void volume_pass(int h)
 			/* outward normal is against the slope; the key light comes from above and a little left */
 			float nx = (float)-gx, ny = (float)-gy, nz = 4.0f;
 			float len = __builtin_sqrtf(nx * nx + ny * ny + nz * nz);
-			/* from above, or toward a fire, lava or window near enough to outshine the sky */
-			float lx = -0.35f, ly = -0.8f, best = 0.0f;
-			for (int i = 0; i < key_count; i++) {
-				float dx = key_lights[i].x - (float)x, dy = key_lights[i].y - (float)y;
-				float d = __builtin_sqrtf(dx * dx + dy * dy);
-				float w = 1.0f - d / (key_lights[i].reach * 1.5f);
-				if (w > best && d > 1.0f) {
-					best = w;
-					lx = -0.35f * (1.0f - w) + dx / d * w;
-					ly = -0.8f * (1.0f - w) + dy / d * w;
-				}
-			}
-			float ll = __builtin_sqrtf(lx * lx + ly * ly);
-			lx = lx / ll * 0.87f, ly = ly / ll * 0.87f;
+			float lx, ly;
+			key_direction(x, y, &lx, &ly);
+			lx *= 0.87f, ly *= 0.87f;
 			float facing = (nx * lx + ny * ly + nz * 0.49f) / len - 0.49f;
 			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
 			uint32_t c = grid[y][x];
@@ -1670,38 +1731,21 @@ static void find_depth(int fog[7])
 	fog[6] = 72;
 }
 
-/* Before the picture is scaled: one console pixel at a time. The corners fall off smoothly
- * enough that a step per console pixel never shows. */
-static void grade_pass(const CoreMotion *m, int h)
+/* The scene and its characters, not text, windows or the HUD. */
+static uint8_t graded[MAX_HEIGHT][WIDTH];
+
+typedef struct {
+	const CoreMotion *m;
+	int h, n, fog[7], air[3];
+} Grade;
+
+static void grade_rows(void *context, int y0, int y1)
 {
-	grade_init();
-	find_room(m, h);
-	static uint8_t graded[MAX_HEIGHT][WIDTH];
-	long sum[3] = { 0, 0, 0 }, n = 0;
-	for (int y = 0; y < h; y++) {
-		int row = y + m->top;
-		for (int x = 0; x < WIDTH; x++) {
-			int layer = m->source[row][x];
-			bool scene = sprite_pixel(x, y) ? sprite_body[y][x] >= 24
-				: !light_window(m, row, x) && (layer > 3 || !room_band[layer]) && light_plane(m, row, x);
-			graded[y][x] = scene;
-			if (scene && !sprite_pixel(x, y)) {
-				uint32_t c = grid[y][x];
-				sum[0] += c >> 16 & 255, sum[1] += c >> 8 & 255, sum[2] += c & 255;
-				n++;
-			}
-		}
-	}
-	int fog[7];
-	find_depth(fog);
-	int air[3] = { 0, 0, 0 };
-	if (n) {
-		int mean[3] = { (int)(sum[0] / n), (int)(sum[1] / n), (int)(sum[2] / n) };
-		int l = (mean[0] * 77 + mean[1] * 150 + mean[2] * 29) >> 8;
-		for (int c = 0; c < 3; c++)
-			air[c] = (l + mean[c]) / 2 + 36 > 255 ? 255 : (l + mean[c]) / 2 + 36;
-	}
-	for (int y = 0; y < h; y++) {
+	const Grade *gr = context;
+	const CoreMotion *m = gr->m;
+	int h = gr->h, n = gr->n;
+	const int *fog = gr->fog, *air = gr->air;
+	for (int y = y0; y < y1; y++) {
 		int row = y + m->top;
 		float dy = ((float)y + 0.5f) / (float)h * 2.0f - 1.0f;
 		int vy = (int)((1.0f - 0.24f * dy * dy * dy * dy) * 256.0f);
@@ -1713,14 +1757,10 @@ static void grade_pass(const CoreMotion *m, int h)
 			int veil = n && !sprite_pixel(x, y) ? fog[m->source[row][x] > 6 ? 6 : m->source[row][x]] : 0;
 			/* what a warm light reaches keeps its warmth: no cool shadows, no veil of distance */
 			int warm = 0;
-			for (int i = 0; i < key_count; i++) {
-				float dx = key_lights[i].x - (float)x, dy = key_lights[i].y - (float)y, reach = key_lights[i].reach * 1.35f;
-				float d2 = dx * dx + dy * dy;
-				if (d2 >= reach * reach)
-					continue;
-				float a = 1.0f - __builtin_sqrtf(d2) / reach;
-				int w = (int)(a * a * (3.0f - 2.0f * a) * (float)key_lights[i].warmth);
-				warm = w > warm ? w : warm;
+			if (key_count) {
+				float k[4];
+				light_at(x, y, k);
+				warm = (int)k[2];
 			}
 			veil = veil * (256 - warm) >> 8;
 			if (veil) {
@@ -1745,6 +1785,304 @@ static void grade_pass(const CoreMotion *m, int h)
 			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
 		}
 	}
+}
+
+/* Before the picture is scaled: one console pixel at a time. The corners fall off smoothly
+ * enough that a step per console pixel never shows. */
+static void grade_pass(const CoreMotion *m, int h)
+{
+	grade_init();
+	find_room(m, h);
+	long sum[3] = { 0, 0, 0 }, n = 0;
+	for (int y = 0; y < h; y++) {
+		int row = y + m->top;
+		for (int x = 0; x < WIDTH; x++) {
+			int layer = m->source[row][x];
+			bool scene = sprite_pixel(x, y) ? sprite_body[y][x] >= 24
+				: !light_window(m, row, x) && (layer > 3 || !room_band[layer]) && light_plane(m, row, x);
+			graded[y][x] = scene;
+			if (scene && !sprite_pixel(x, y)) {
+				uint32_t c = grid[y][x];
+				sum[0] += c >> 16 & 255, sum[1] += c >> 8 & 255, sum[2] += c & 255;
+				n++;
+			}
+		}
+	}
+	int fog[7];
+	find_depth(fog);
+	int air[3] = { 0, 0, 0 };
+	if (n) {
+		int mean[3] = { (int)(sum[0] / n), (int)(sum[1] / n), (int)(sum[2] / n) };
+		int l = (mean[0] * 77 + mean[1] * 150 + mean[2] * 29) >> 8;
+		for (int c = 0; c < 3; c++)
+			air[c] = (l + mean[c]) / 2 + 36 > 255 ? 255 : (l + mean[c]) / 2 + 36;
+	}
+	Grade gr = { m, h, (int)n, { 0 }, { air[0], air[1], air[2] } };
+	memcpy(gr.fog, fog, sizeof fog);
+	remaster_bands(h, grade_rows, &gr);
+}
+
+/* The outline of a character against the scenery is drawn as a line instead of a staircase:
+ * the figure's shape is read between the centers of its console pixels and cut along where it
+ * crosses half, with one screen pixel of soft edge. A straight side stays where it was; a slope
+ * of any steepness becomes a slope. Inside the figure and in the scenery every pixel stays square,
+ * and a one-pixel line or tip keeps its square ends. */
+static uint8_t outline_fig[MAX_HEIGHT][WIDTH];
+
+static void silhouette_rows(void *context, int y0, int y1)
+{
+	unsigned out_w = ((const Canvas *)context)->out_w;
+	int h = ((const Canvas *)context)->height;
+	float inv = 1.0f / (float)SCALE;
+	for (int j = y0; j < y1 && j + 1 < h; j++)
+		for (int i = 0; i + 1 < WIDTH; i++) {
+			int a = outline_fig[j][i], b = outline_fig[j][i + 1], c = outline_fig[j + 1][i], d = outline_fig[j + 1][i + 1];
+			if ((a == 0) == (b == 0) && (a == 0) == (c == 0) && (a == 0) == (d == 0))
+				continue;
+			if (a == 2 || b == 2 || c == 2 || d == 2)
+				continue;
+			/* the dual cell between the four pixel centers */
+			const int cx[4] = { i, i + 1, i, i + 1 }, cy[4] = { j, j, j + 1, j + 1 };
+			const int in[4] = { a != 0, b != 0, c != 0, d != 0 };
+			int half = SCALE / 2;
+			for (int sy = 0; sy < SCALE; sy++) {
+				float fy = ((float)sy + 0.5f) * inv;
+				int py = j * SCALE + half + sy;
+				uint32_t *line = &image[(size_t)py * out_w];
+				for (int sx = 0; sx < SCALE; sx++) {
+					float fx = ((float)sx + 0.5f) * inv;
+					float mask = (in[0] * (1.0f - fx) + in[1] * fx) * (1.0f - fy) + (in[2] * (1.0f - fx) + in[3] * fx) * fy;
+					float cover = (mask - 0.5f) * (float)SCALE + 0.5f;
+					cover = cover < 0.0f ? 0.0f : cover > 1.0f ? 1.0f : cover;
+					int near = (fx >= 0.5f) + 2 * (fy >= 0.5f);
+					if ((in[near] && cover >= 1.0f) || (!in[near] && cover <= 0.0f))
+						continue;
+					/* the colors of the nearest figure pixel and the nearest scenery pixel */
+					int fig = -1, bg = -1;
+					float fd = 9.0f, bd = 9.0f;
+					for (int k = 0; k < 4; k++) {
+						float ddx = fx - (float)(k & 1), ddy = fy - (float)(k >> 1), dd = ddx * ddx + ddy * ddy;
+						if (in[k] && dd < fd)
+							fd = dd, fig = k;
+						if (!in[k] && dd < bd)
+							bd = dd, bg = k;
+					}
+					uint32_t f = grid[cy[fig]][cx[fig]], g = grid[cy[bg]][cx[bg]];
+					int t = (int)(cover * 256.0f);
+					int r = (int)(g >> 16 & 255) + (((int)(f >> 16 & 255) - (int)(g >> 16 & 255)) * t >> 8);
+					int gg = (int)(g >> 8 & 255) + (((int)(f >> 8 & 255) - (int)(g >> 8 & 255)) * t >> 8);
+					int bl = (int)(g & 255) + (((int)(f & 255) - (int)(g & 255)) * t >> 8);
+					int px = i * SCALE + half + sx;
+					line[px] = (line[px] & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)gg << 8 | (uint32_t)bl;
+				}
+			}
+		}
+}
+
+static void silhouette(int h, unsigned out_w)
+{
+	if (SCALE < 4)
+		return;
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++)
+			outline_fig[y][x] = figure(x, y);
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			if (!outline_fig[y][x])
+				continue;
+			int n = (x > 0 && outline_fig[y][x - 1]) + (x + 1 < WIDTH && outline_fig[y][x + 1])
+				+ (y > 0 && outline_fig[y - 1][x]) + (y + 1 < h && outline_fig[y + 1][x]);
+			if (n <= 1)
+				outline_fig[y][x] = 2; /* a tip: kept square */
+		}
+	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
+	remaster_bands(h, silhouette_rows, &canvas);
+}
+
+/* Water named in the list: a sea or a lake is a wide sheet of it. A small patch of the same
+ * blue tiles is a roof or a banner, and stays as it is. */
+#define WATER_LEAST 400
+static void find_water(int h)
+{
+	static uint8_t seen[MAX_HEIGHT][WIDTH];
+	memset(seen, 0, sizeof seen);
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			if (!water[y][x] || seen[y][x])
+				continue;
+			int top = 0, first = 0;
+			light_stack[top++] = y * WIDTH + x;
+			seen[y][x] = 1;
+			while (first < top) {
+				int pos = light_stack[first++];
+				int cy = pos / WIDTH, cx = pos - cy * WIDTH;
+				static const int ny[4] = { 1, -1, 0, 0 }, nx[4] = { 0, 0, 1, -1 };
+				for (int k = 0; k < 4; k++) {
+					int yy = cy + ny[k], xx = cx + nx[k];
+					if (yy < 0 || xx < 0 || yy >= h || xx >= WIDTH || !water[yy][xx] || seen[yy][xx])
+						continue;
+					seen[yy][xx] = 1;
+					light_stack[top++] = yy * WIDTH + xx;
+				}
+			}
+			if (top < WATER_LEAST)
+				for (int i = 0; i < top; i++)
+					water[light_stack[i] / WIDTH][light_stack[i] % WIDTH] = 0;
+		}
+}
+
+/* Water: the light of the sky moves over it in slow broad swells, and the crest of each wave
+ * the artist drew catches the sun now and then as a glint. Both are fixed to the world, so they
+ * travel with the sea when the view scrolls. One color per console pixel. */
+static void water_pass(const CoreMotion *m, int h)
+{
+	float t = (float)m->frame;
+	for (int y = 1; y + 1 < h; y++) {
+		int row = y + m->top;
+		for (int x = 0; x < WIDTH; x++) {
+			if (!water[y][x])
+				continue;
+			int layer = m->source[row][x] > 3 ? 0 : m->source[row][x];
+			int wx = x + room_h[layer], wy = y + room_v[layer];
+			float swell = __builtin_sinf((float)wx * 0.21f + (float)wy * 0.37f + t * 0.05f)
+				+ __builtin_sinf((float)wx * 0.13f - (float)wy * 0.29f - t * 0.037f);
+			int k = (int)(swell * 12.0f);
+			uint32_t c = grid[y][x];
+			int l = luma_of(c);
+			bool crest = water[y - 1][x] && water[y + 1][x] && l >= luma_of(grid[y - 1][x]) + 10 && l >= luma_of(grid[y + 1][x]) + 10;
+			/* glints only on the bright side of a swell, a short dash along the wave, never a lone star */
+			unsigned hash = light_hash((unsigned)(wx >> 1) * 73856093u ^ (unsigned)wy * 19349663u);
+			int glint = 0;
+			if (swell > 0.7f && (crest || hash % 5 == 0)) {
+				int phase = (int)((unsigned)m->frame + hash % 61) % 61;
+				if (phase < 8)
+					glint = (int)((float)(phase < 4 ? phase + 1 : 8 - phase) * (swell - 0.7f) * 45.0f);
+			}
+			int r = (int)(c >> 16 & 255) * (256 + k) >> 8, g = (int)(c >> 8 & 255) * (256 + k) >> 8, b = (int)(c & 255) * (256 + k) >> 8;
+			r += (232 - r) * glint >> 8, g += (240 - g) * glint >> 8, b += (255 - b) * glint >> 8;
+			r = r < 0 ? 0 : r > 255 ? 255 : r, g = g < 0 ? 0 : g > 255 ? 255 : g, b = b < 0 ? 0 : b > 255 ? 255 : b;
+			grid[y][x] = (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+		}
+	}
+}
+
+/* Shine: the glints the artist drew on metal, gold, glass or a polished floor (a pixel or two
+ * much brighter than all around) catch the light as a hard specular, strongest near a fire or
+ * a window. Stone and cloth, drawn without such glints, stay matte. One color per console pixel. */
+static void shine_pass(int h)
+{
+	for (int y = 1; y + 1 < h; y++)
+		for (int x = 1; x + 1 < WIDTH; x++) {
+			if (!graded[y][x] || emits[y][x] || water[y][x])
+				continue;
+			uint32_t c = grid[y][x];
+			int l = luma_of(c);
+			if (l < 120)
+				continue;
+			int around = 0, brighter = 0;
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy)
+						continue;
+					int n = luma_of(grid[y + dy][x + dx]);
+					brighter += n >= l - 8;
+					around = n > around && n < l - 8 ? n : around;
+				}
+			if (brighter > 2 || l - around < 48)
+				continue; /* part of a bright area, or not standing out: not a glint */
+			if ((x >= 2 && grid[y][x - 2] == c) || (x + 2 < WIDTH && grid[y][x + 2] == c)
+				|| (y >= 2 && grid[y - 2][x] == c) || (y + 2 < h && grid[y + 2][x] == c))
+				continue; /* a row of dots, a pattern: it would sparkle like stars */
+			float kf[4];
+			light_at(x, y, kf);
+			float near = kf[3];
+			int k = 50 + (int)(near * 110.0f);
+			int r = (int)(c >> 16 & 255), g = (int)(c >> 8 & 255), b = (int)(c & 255);
+			r += (255 - r) * k >> 8, g += (255 - g) * k >> 8, b += (255 - b) * k >> 8;
+			grid[y][x] = (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+		}
+}
+
+/* Relief: where two colors of the drawing meet, the lighter one stands a little proud of the
+ * darker. Its edge that faces the light catches it and it throws a thin shadow on the other
+ * side, so the art reads as carved and the light seems to move over it. Only between two
+ * pixels of the scene or two of one figure: never on the outline of a figure against the
+ * scenery, never on text, windows or the HUD. */
+static void shade_strip(unsigned out_w, int x, int y, int side, int k)
+{
+	int w = SCALE / 4 < 1 ? 1 : SCALE / 4;
+	for (int i = 0; i < w; i++) {
+		int kk = k * (w - i) / w;
+		for (int j = 0; j < SCALE; j++) {
+			int sx = side == 0 ? i : side == 1 ? SCALE - 1 - i : j;
+			int sy = side == 2 ? i : side == 3 ? SCALE - 1 - i : j;
+			uint32_t *p = &image[((size_t)y * SCALE + (unsigned)sy) * out_w + (size_t)x * SCALE + (unsigned)sx];
+			int r = (int)(*p >> 16 & 255) * (256 + kk) >> 8, g = (int)(*p >> 8 & 255) * (256 + kk) >> 8, b = (int)(*p & 255) * (256 + kk) >> 8;
+			r = r > 255 ? 255 : r, g = g > 255 ? 255 : g, b = b > 255 ? 255 : b;
+			*p = (*p & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+		}
+	}
+}
+
+static int8_t relief_k[MAX_HEIGHT][WIDTH][4];
+
+static void relief_rows(void *context, int y0, int y1)
+{
+	unsigned out_w = *(const unsigned *)context;
+	for (int y = y0; y < y1; y++)
+		for (int x = 0; x < WIDTH; x++)
+			for (int s = 0; s < 4; s++)
+				if (relief_k[y][x][s])
+					shade_strip(out_w, x, y, s, relief_k[y][x][s]);
+}
+
+static void relief(int h, unsigned out_w)
+{
+	if (SCALE < 4)
+		return;
+	/* what can take relief: the scene and its figures (1) or (2), with the brightness of each */
+	static uint8_t kind[MAX_HEIGHT][WIDTH], lum[MAX_HEIGHT][WIDTH];
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			kind[y][x] = !graded[y][x] || emits[y][x] || water[y][x] ? 0 : sprite_pixel(x, y) ? 2 : 1;
+			lum[y][x] = (uint8_t)luma_of(grid[y][x]);
+		}
+	memset(relief_k, 0, sizeof relief_k);
+	/* left, right, up, down */
+	static const int sdx[4] = { -1, 1, 0, 0 }, sdy[4] = { 0, 0, -1, 1 };
+	for (int y = 1; y + 1 < h; y++)
+		for (int x = 1; x + 1 < WIDTH; x++) {
+			int here = kind[y][x];
+			if (!here)
+				continue;
+			int l = lum[y][x];
+			uint32_t c = grid[y][x];
+			float lx = 0, ly = 0;
+			bool known = false;
+			for (int s = 0; s < 4; s++) {
+				int nx = x + sdx[s], ny = y + sdy[s];
+				int diff = l - lum[ny][nx];
+				if (diff < 16 || kind[ny][nx] != here)
+					continue; /* the lower of the two or alike, or another surface: not this one's edge */
+				/* an edge of a shape, two pixels long at least, not a speck of dither */
+				bool along = s < 2 ? grid[y - 1][x] == c || grid[y + 1][x] == c : grid[y][x - 1] == c || grid[y][x + 1] == c;
+				if (!along)
+					continue;
+				if (!known) {
+					key_direction(x, y, &lx, &ly);
+					known = true;
+				}
+				float facing = (float)sdx[s] * lx + (float)sdy[s] * ly;
+				/* by contrast against the darker side, so a dim room shows it as much as a bright one */
+				int k = diff * 160 / (l - diff + 48);
+				k = k > 100 ? 100 : k;
+				if (facing > 0.2f)
+					relief_k[y][x][s] = (int8_t)(k * facing);
+				else if (facing < -0.2f)
+					relief_k[ny][nx][s ^ 1] = (int8_t)(k * facing * 1.2f);
+			}
+		}
+	remaster_bands(h, relief_rows, &out_w);
 }
 
 /* Each character throws a soft round shadow on the ground it stands on, darkest under the
@@ -1816,9 +2154,13 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_h = height * SCALE;
 
 	prepare_grid();
+	scan_listed(m, (int)height);
 	volume_pass((int)height);
 	grade_pass(m, (int)height);
+	water_pass(m, (int)height);
+	shine_pass((int)height);
 	blocks(out_w);
+	silhouette((int)height, out_w);
 	ground_shadows(m, out_w, out_h);
 
 	memset(shadowed, 0, (size_t)out_w * out_h);
@@ -1879,6 +2221,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	}
 
 	light_pass(m, height, out_w);
+	relief((int)height, out_w);
 	*width = out_w;
 	*out_height = out_h;
 	return image;

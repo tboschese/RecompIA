@@ -376,7 +376,12 @@ static void present(bool swap, bool to_window)
 	if (getenv("REMASTERIA_CAPTURE") && hd >= 1 && hd <= max_scale)
 		scale = hd;
 	int dst_w, dst_h;
-	if (scale >= 1) {
+	if (scale >= 4 && !getenv("REMASTERIA_CAPTURE")) {
+		/* Big enough that a console pixel 8 or 9 screen pixels wide cannot be told apart: fill
+		 * the screen's height or width instead of leaving the rest of a whole multiple black. */
+		float fit = (float)w / base_w < (float)h / base_h ? (float)w / base_w : (float)h / base_h;
+		dst_w = (int)(base_w * fit), dst_h = (int)(base_h * fit);
+	} else if (scale >= 1) {
 		dst_w = base_w * scale, dst_h = base_h * scale;
 	} else if (hd > 1 && w >= base_w * hd && h >= base_h * hd) {
 		int hw = base_w * hd, hh = base_h * hd;
