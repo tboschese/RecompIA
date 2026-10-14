@@ -1457,8 +1457,53 @@ static bool figure(int x, int y)
 	return sprite_pixel(x, y) && sprite_body[y][x] >= 24;
 }
 
+/* The light a figure takes from the scenery around it: the mean color of what is not a
+ * figure within ENV_REACH, as a tint per channel (256 leaves it) at the same brightness. */
+#define ENV_REACH 24
+static int env_sum[MAX_HEIGHT + 1][WIDTH + 1][4];
+
+static void environment(int h)
+{
+	for (int x = 0; x <= WIDTH; x++)
+		env_sum[0][x][0] = env_sum[0][x][1] = env_sum[0][x][2] = env_sum[0][x][3] = 0;
+	for (int y = 0; y < h; y++) {
+		int row[4] = { 0, 0, 0, 0 };
+		env_sum[y + 1][0][0] = env_sum[y + 1][0][1] = env_sum[y + 1][0][2] = env_sum[y + 1][0][3] = 0;
+		for (int x = 0; x < WIDTH; x++) {
+			if (!sprite_pixel(x, y)) {
+				uint32_t c = grid[y][x];
+				row[0] += (int)(c >> 16 & 255), row[1] += (int)(c >> 8 & 255), row[2] += (int)(c & 255), row[3]++;
+			}
+			for (int k = 0; k < 4; k++)
+				env_sum[y + 1][x + 1][k] = env_sum[y][x + 1][k] + row[k];
+		}
+	}
+}
+
+static void env_tint(int x, int y, int h, int tint[3])
+{
+	int x0 = x - ENV_REACH < 0 ? 0 : x - ENV_REACH, x1 = x + ENV_REACH + 1 > WIDTH ? WIDTH : x + ENV_REACH + 1;
+	int y0 = y - ENV_REACH < 0 ? 0 : y - ENV_REACH, y1 = y + ENV_REACH + 1 > h ? h : y + ENV_REACH + 1;
+	int s[4];
+	for (int k = 0; k < 4; k++)
+		s[k] = env_sum[y1][x1][k] - env_sum[y0][x1][k] - env_sum[y1][x0][k] + env_sum[y0][x0][k];
+	tint[0] = tint[1] = tint[2] = 256;
+	if (s[3] < 64)
+		return;
+	int r = s[0] / s[3], g = s[1] / s[3], b = s[2] / s[3];
+	int l = (r * 77 + g * 150 + b * 29) >> 8;
+	if (l < 12)
+		return;
+	int c3[3] = { r, g, b };
+	for (int k = 0; k < 3; k++) {
+		int t = c3[k] * 256 / l;
+		tint[k] = t < 160 ? 160 : t > 360 ? 360 : t;
+	}
+}
+
 static void volume_pass(int h)
 {
+	environment(h);
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < WIDTH; x++) {
 			int d = 0;
@@ -1503,8 +1548,13 @@ static void volume_pass(int h)
 			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
 			uint32_t c = grid[y][x];
 			int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
+			int tint[3];
+			env_tint(x, y, h, tint);
+			/* the whole figure a little in the room's color, the side turned away from the key light more */
+			int bounce = 64 + (k < 0 ? -k : 0);
 			for (int i = 0; i < 3; i++) {
 				o[i] = o[i] * (256 + k) / 256;
+				o[i] += (o[i] * tint[i] / 256 - o[i]) * bounce / 256;
 				o[i] = o[i] < 0 ? 0 : o[i] > 255 ? 255 : o[i];
 			}
 			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
