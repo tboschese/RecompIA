@@ -1431,9 +1431,9 @@ static void grade_init(void)
 	done = true;
 	for (int v = 0; v < 256; v++) {
 		float t = (float)v / 255.0f;
-		float s = t * 0.72f + t * t * (3.0f - 2.0f * t) * 0.28f;
+		float s = t * 0.6f + t * t * (3.0f - 2.0f * t) * 0.4f;
 		float low = t * (1.0f - t) * (1.0f - t) * 4.0f, high = t * t * (1.0f - t) * 4.0f;
-		float shift[3] = { 0.035f * high - 0.02f * low, 0.012f * high, 0.045f * low - 0.03f * high };
+		float shift[3] = { 0.05f * high - 0.03f * low, 0.015f * high, 0.065f * low - 0.045f * high };
 		for (int c = 0; c < 3; c++) {
 			float o = (s + shift[c]) * 255.0f + 0.5f;
 			grade_curve[c][v] = (uint8_t)(o < 0 ? 0 : o > 255 ? 255 : o);
@@ -1441,7 +1441,7 @@ static void grade_init(void)
 	}
 	for (int x = 0; x < WIDTH; x++) {
 		float d = ((float)x + 0.5f) / (float)WIDTH * 2.0f - 1.0f;
-		vignette_x[x] = (int)((1.0f - 0.14f * d * d * d * d) * 256.0f);
+		vignette_x[x] = (int)((1.0f - 0.2f * d * d * d * d) * 256.0f);
 	}
 }
 
@@ -1511,25 +1511,83 @@ static void volume_pass(int h)
 		}
 }
 
+/* Depth: a layer that scrolls slower than the nearest one is farther away (parallax), and so is
+ * the backdrop. Far layers sit behind a veil of the scene's own air color, the way distance
+ * reads in a painted background. The motion is remembered, so a still moment keeps it. */
+static float layer_motion[4];
+static uint16_t layer_last[4];
+static bool layer_seen;
+
+static void find_depth(int fog[7])
+{
+	float most = 0;
+	for (int layer = 0; layer < 4; layer++) {
+		int moved = layer_seen ? abs((int)room_h[layer] - (int)layer_last[layer]) : 0;
+		if (moved > 64)
+			moved = 0; /* a jump to a new room, not a scroll */
+		layer_motion[layer] = layer_motion[layer] * 0.98f + (float)moved;
+		layer_last[layer] = room_h[layer];
+		most = layer_motion[layer] > most ? layer_motion[layer] : most;
+	}
+	layer_seen = true;
+	for (int layer = 0; layer < 4; layer++) {
+		float share = most > 4.0f ? layer_motion[layer] / most : 1.0f;
+		fog[layer] = share >= 0.8f ? 0 : share >= 0.4f ? 40 : 72;
+	}
+	fog[4] = fog[5] = 0;
+	fog[6] = 72;
+}
+
 /* Before the picture is scaled: one console pixel at a time. The corners fall off smoothly
  * enough that a step per console pixel never shows. */
 static void grade_pass(const CoreMotion *m, int h)
 {
 	grade_init();
 	find_room(m, h);
+	static uint8_t graded[MAX_HEIGHT][WIDTH];
+	long sum[3] = { 0, 0, 0 }, n = 0;
+	for (int y = 0; y < h; y++) {
+		int row = y + m->top;
+		for (int x = 0; x < WIDTH; x++) {
+			int layer = m->source[row][x];
+			bool scene = sprite_pixel(x, y) ? sprite_body[y][x] >= 24
+				: !light_window(m, row, x) && (layer > 3 || !room_band[layer]) && light_plane(m, row, x);
+			graded[y][x] = scene;
+			if (scene && !sprite_pixel(x, y)) {
+				uint32_t c = grid[y][x];
+				sum[0] += c >> 16 & 255, sum[1] += c >> 8 & 255, sum[2] += c & 255;
+				n++;
+			}
+		}
+	}
+	int fog[7];
+	find_depth(fog);
+	int air[3] = { 0, 0, 0 };
+	if (n) {
+		int mean[3] = { (int)(sum[0] / n), (int)(sum[1] / n), (int)(sum[2] / n) };
+		int l = (mean[0] * 77 + mean[1] * 150 + mean[2] * 29) >> 8;
+		for (int c = 0; c < 3; c++)
+			air[c] = (l + mean[c]) / 2 + 36 > 255 ? 255 : (l + mean[c]) / 2 + 36;
+	}
 	for (int y = 0; y < h; y++) {
 		int row = y + m->top;
 		float dy = ((float)y + 0.5f) / (float)h * 2.0f - 1.0f;
-		int vy = (int)((1.0f - 0.16f * dy * dy * dy * dy) * 256.0f);
+		int vy = (int)((1.0f - 0.24f * dy * dy * dy * dy) * 256.0f);
 		for (int x = 0; x < WIDTH; x++) {
-			bool graded = sprite_pixel(x, y) ? sprite_body[y][x] >= 24 : light_plane(m, row, x) && !light_window(m, row, x);
-			if (!graded)
+			if (!graded[y][x])
 				continue;
 			uint32_t c = grid[y][x];
-			int r = grade_curve[0][c >> 16 & 255], g = grade_curve[1][c >> 8 & 255], b = grade_curve[2][c & 255];
+			int r = c >> 16 & 255, g = c >> 8 & 255, b = c & 255;
+			int veil = n && !sprite_pixel(x, y) ? fog[m->source[row][x] > 6 ? 6 : m->source[row][x]] : 0;
+			if (veil) {
+				r += (air[0] - r) * veil >> 8;
+				g += (air[1] - g) * veil >> 8;
+				b += (air[2] - b) * veil >> 8;
+			}
+			r = grade_curve[0][r], g = grade_curve[1][g], b = grade_curve[2][b];
 			int l = (r * 77 + g * 150 + b * 29) >> 8;
 			int v = vignette_x[x] * vy;
-			int o[3] = { l + ((r - l) * 296 >> 8), l + ((g - l) * 296 >> 8), l + ((b - l) * 296 >> 8) };
+			int o[3] = { l + ((r - l) * 330 >> 8), l + ((g - l) * 330 >> 8), l + ((b - l) * 330 >> 8) };
 			for (int k = 0; k < 3; k++) {
 				o[k] = o[k] * v >> 16;
 				o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
