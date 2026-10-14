@@ -632,12 +632,25 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 			}
 		}
 	memset(by_light, 0, sizeof by_light);
-	for (int y = 0; y < h; y++)
-		for (int x = 0; x < WIDTH; x++)
-			if (emits[y][x])
-				for (int yy = y < 2 ? 0 : y - 2; yy <= y + 2 && yy < h; yy++)
-					for (int xx = x < 2 ? 0 : x - 2; xx <= x + 2 && xx < WIDTH; xx++)
-						by_light[yy][xx] = 1;
+	{
+		static uint8_t near_row[MAX_HEIGHT][WIDTH];
+		for (int y = 0; y < h; y++) {
+			int run = 0;
+			for (int x = WIDTH + 1; x >= 0; x--) {
+				run = x - 2 >= 0 && x - 2 < WIDTH && emits[y][x - 2] ? 5 : run - 1;
+				if (x < WIDTH)
+					near_row[y][x] = run > 0;
+			}
+		}
+		for (int x = 0; x < WIDTH; x++) {
+			int run = 0;
+			for (int y = h + 1; y >= 0; y--) {
+				run = y - 2 >= 0 && y - 2 < h && near_row[y - 2][x] ? 5 : run - 1;
+				if (y < h)
+					by_light[y][x] = run > 0;
+			}
+		}
+	}
 
 	/* A scene full of white is daylight outside, where a cloud is not a lamp. */
 	int pale_total = 0;
@@ -1324,16 +1337,26 @@ static void shaft_rows(void *context, int y0, int y1)
 static void find_bloom(int h)
 {
 	static int16_t across[MAX_HEIGHT][WIDTH][3];
+	bool any = false;
 	for (int y = 0; y < h; y++) {
 		int sum[3] = { 0, 0, 0 };
 		int src[WIDTH][3];
+		bool row_hot = false;
 		for (int x = 0; x < WIDTH; x++) {
+			src[x][0] = src[x][1] = src[x][2] = 0;
+			if (!emits[y][x])
+				continue;
 			uint32_t c = at_xy(x, y);
-			bool hot = emits[y][x] && luma_of(c) >= 110;
-			src[x][0] = hot ? (int)(c >> 16 & 255) : 0;
-			src[x][1] = hot ? (int)(c >> 8 & 255) : 0;
-			src[x][2] = hot ? (int)(c & 255) : 0;
+			if (luma_of(c) < 110)
+				continue;
+			src[x][0] = (int)(c >> 16 & 255), src[x][1] = (int)(c >> 8 & 255), src[x][2] = (int)(c & 255);
+			row_hot = true;
 		}
+		if (!row_hot) {
+			memset(across[y], 0, sizeof across[y]);
+			continue;
+		}
+		any = true;
 		for (int x = -BLOOM_REACH; x < WIDTH; x++) {
 			int in = x + BLOOM_REACH, out = x - BLOOM_REACH - 1;
 			for (int c = 0; c < 3; c++) {
@@ -1347,19 +1370,28 @@ static void find_bloom(int h)
 					across[y][x][c] = (int16_t)(sum[c] / (2 * BLOOM_REACH + 1));
 		}
 	}
-	for (int x = 0; x < WIDTH; x++) {
-		int sum[3] = { 0, 0, 0 };
-		for (int y = -BLOOM_REACH; y < h; y++) {
-			int in = y + BLOOM_REACH, out = y - BLOOM_REACH - 1;
-			for (int c = 0; c < 3; c++) {
-				if (in < h)
-					sum[c] += across[in][x][c];
-				if (out >= 0)
-					sum[c] -= across[out][x][c];
-			}
-			if (y >= 0)
-				for (int c = 0; c < 3; c++)
-					bloom[y][x][c] = (int16_t)(sum[c] * 2 / (5 * (2 * BLOOM_REACH + 1)));
+	if (!any) {
+		memset(bloom, 0, sizeof bloom[0] * (size_t)h);
+		return;
+	}
+	static int sum[WIDTH * 3];
+	memset(sum, 0, sizeof sum);
+	for (int y = -BLOOM_REACH; y < h; y++) {
+		int in = y + BLOOM_REACH, out = y - BLOOM_REACH - 1;
+		if (in < h) {
+			const int16_t *a = &across[in][0][0];
+			for (int i = 0; i < WIDTH * 3; i++)
+				sum[i] += a[i];
+		}
+		if (out >= 0) {
+			const int16_t *a = &across[out][0][0];
+			for (int i = 0; i < WIDTH * 3; i++)
+				sum[i] -= a[i];
+		}
+		if (y >= 0) {
+			int16_t *b = &bloom[y][0][0];
+			for (int i = 0; i < WIDTH * 3; i++)
+				b[i] = (int16_t)(sum[i] * 2 / (5 * (2 * BLOOM_REACH + 1)));
 		}
 	}
 }
