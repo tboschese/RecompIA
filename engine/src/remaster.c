@@ -237,7 +237,7 @@ typedef struct {
 /* The game's own list of lights, by tile (lights.txt). */
 typedef struct {
 	uint64_t key;
-	char kind;  /* 'f' flame, 'g' glow, 'w' window, 'n' none */
+	char kind;  /* 'f' flame, 'g' glow, 'w' window, 'n' none, 'a' water */
 	uint8_t luma;
 	int16_t r, g, b, radius;  /* -1: from what is drawn */
 } Listed;
@@ -249,6 +249,7 @@ static LightFound found[LIGHT_MAX * LIGHT_KEYS];
 static int found_count;
 static uint64_t tile_keys[MAX_HEIGHT][WIDTH];
 static int16_t listed_at[MAX_HEIGHT][WIDTH];
+static uint8_t water[MAX_HEIGHT][WIDTH];
 static int blob_px[MAX_HEIGHT * WIDTH];
 
 static int listed_find(uint64_t key)
@@ -287,7 +288,7 @@ bool remaster_load_lights(const char *path)
 		if (line[0] == '#' || sscanf(line, "%llx %15s %d %7s %7s %7s %7s", &key, kind, &luma, r, g, b, radius) < 2 || !key)
 			continue;
 		char k = !strcmp(kind, "flame") ? 'f' : !strcmp(kind, "glow") ? 'g' : !strcmp(kind, "window") ? 'w'
-			: !strcmp(kind, "none") ? 'n' : 0;
+			: !strcmp(kind, "none") ? 'n' : !strcmp(kind, "water") ? 'a' : 0;
 		if (!k)
 			continue; /* ? : not reviewed yet */
 		size_t i = key & listed_mask;
@@ -548,6 +549,7 @@ static void emit_rows(void *context, int y0, int y1)
 /* Last frame's lights, for the key light of the figures' volume, drawn before this frame's. */
 typedef struct {
 	float x, y, reach;
+	int warmth;  /* 0..256: how much redder than blue the light is */
 } KeyLight;
 static KeyLight key_lights[LIGHT_MAX];
 static int key_count;
@@ -562,7 +564,15 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 		memset(emits, 0, sizeof emits);
 	/* The game's own list overrides the detection, a run of one tile at a time. listed_at and
 	 * tile_keys are only read where a pixel emits. */
-	if (listed_count > 0 || finding_lights) {
+	static FILE *key_dump;
+	static bool key_dump_tried;
+	if (!key_dump_tried) {
+		key_dump_tried = true;
+		if (getenv("REMASTERIA_KEY_DUMP"))
+			key_dump = fopen(getenv("REMASTERIA_KEY_DUMP"), "wb");
+	}
+	memset(water, 0, sizeof water);
+	if (listed_count > 0 || finding_lights || key_dump) {
 		hdpack_keys_begin();
 		for (int y = 0; y < h; y++) {
 			int row = y + m->top;
@@ -575,15 +585,35 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 				uint64_t key = hdpack_key(m, row, x);
 				int at = listed_find(key);
 				for (; x < end; x++) {
-					if (finding_lights)
+					if (finding_lights || key_dump)
 						tile_keys[y][x] = key;
 					if (at < 0)
 						continue;
+					if (listed[at].kind == 'a') {
+						water[y][x] = !sprite_pixel(x, y) && !light_window(m, row, x);
+						emits[y][x] = 0;
+						continue;
+					}
 					listed_at[y][x] = (int16_t)at;
 					emits[y][x] = listed[at].kind != 'n' && m->brightness[row] >= 15
 						&& luma_of(m->color[row][x] & 0xffffff) >= listed[at].luma ? 9 : 0;
 				}
 			}
+		}
+		if (key_dump) {
+			/* for the tools: each frame's tile keys, layers and colors, to name the water by tile */
+			int32_t rows = h;
+			fwrite(&rows, sizeof rows, 1, key_dump);
+			for (int y = 0; y < h; y++)
+				fwrite(tile_keys[y], sizeof(uint64_t), WIDTH, key_dump);
+			for (int y = 0; y < h; y++)
+				fwrite(m->source[y + m->top], 1, WIDTH, key_dump);
+			for (int y = 0; y < h; y++)
+				for (int x = 0; x < WIDTH; x++) {
+					uint32_t c = at_xy(x, y);
+					fwrite(&c, sizeof c, 1, key_dump);
+				}
+			fflush(key_dump);
 		}
 	}
 	memset(by_light, 0, sizeof by_light);
@@ -891,7 +921,8 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 	for (int k = 0; k < count && key_count < LIGHT_MAX; k++) {
 		const Light *l = &lights[k];
 		key_lights[key_count++] = (KeyLight){ (float)(l->x0 + l->x1) * 0.5f, (float)(l->y0 + l->y1) * 0.5f,
-			(float)(wide_light(l) ? 96 : l->radius > 24 ? l->radius : 24) };
+			(float)(wide_light(l) ? 96 : l->radius > 24 ? l->radius : 24),
+			l->r - l->b <= 0 ? 0 : (l->r - l->b) * 2 > 256 ? 256 : (l->r - l->b) * 2 };
 	}
 	int points = 0;
 	for (int k = 0; k < count; k++)
@@ -971,7 +1002,10 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 			power = 82 + (int)(light_hash(m->frame / 3 * 131u + (unsigned)i * 977u) % 19);
 		if (l->life < GLOW_HOLD)
 			power = power * l->life / GLOW_HOLD;
-		int radius = l->radius * (l->flame ? 94 + (int)(light_hash(m->frame / 5 + (unsigned)i) % 7) : 100) / 100;
+		/* the smooth falloff is dim at its edge, so the pool reaches farther to light as much of the room */
+		int radius = l->radius * (l->flame ? 94 + (int)(light_hash(m->frame / 5 + (unsigned)i) % 7) : 100) * 135 / 10000;
+		if (radius > REACH)
+			radius = REACH;
 		int x0 = l->x - radius, x1 = l->x + radius, y0 = l->y - radius, y1 = l->y + radius;
 		if (x0 < 0)
 			x0 = 0;
@@ -1079,7 +1113,7 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 /* Wide lights: from every glowing pixel of them at once, outward, each pixel learns the nearest
  * one and how far it is. Flat rings by that distance on the scenery; on a figure, the edge that
  * faces the glow takes its color, the way lava or a bright window rims what stands before it. */
-#define WIDE_REACH 40
+#define WIDE_REACH 54
 static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h)
 {
 	static uint8_t owner[MAX_HEIGHT][WIDTH];
@@ -1450,7 +1484,7 @@ static void blocks(unsigned out_w)
 /* A film grade on the scene and its characters: a gentle S curve, cool shadows and warm
  * highlights, richer color, and the corners falling off. Text, windows, the HUD and its
  * bars keep the game's own colors. */
-static uint8_t grade_curve[3][256];
+static uint8_t grade_curve[3][256], grade_warm[3][256];
 static int vignette_x[WIDTH];
 
 static void grade_init(void)
@@ -1464,9 +1498,13 @@ static void grade_init(void)
 		float s = t * 0.6f + t * t * (3.0f - 2.0f * t) * 0.4f;
 		float low = t * (1.0f - t) * (1.0f - t) * 4.0f, high = t * t * (1.0f - t) * 4.0f;
 		float shift[3] = { 0.05f * high - 0.03f * low, 0.015f * high, 0.065f * low - 0.045f * high };
+		/* near a fire the shadows keep the light's warmth instead of turning cool, and do not
+		 * sink: the light multiplies them, so its pool keeps its reach */
+		float warm[3] = { 0.05f * high + 0.03f * low, 0.015f * high + 0.01f * low, -0.045f * high - 0.03f * low };
 		for (int c = 0; c < 3; c++) {
-			float o = (s + shift[c]) * 255.0f + 0.5f;
+			float o = (s + shift[c]) * 255.0f + 0.5f, w = (t + warm[c]) * 255.0f + 0.5f;
 			grade_curve[c][v] = (uint8_t)(o < 0 ? 0 : o > 255 ? 255 : o);
+			grade_warm[c][v] = (uint8_t)(w < 0 ? 0 : w > 255 ? 255 : w);
 		}
 	}
 	for (int x = 0; x < WIDTH; x++) {
@@ -1673,12 +1711,30 @@ static void grade_pass(const CoreMotion *m, int h)
 			uint32_t c = grid[y][x];
 			int r = c >> 16 & 255, g = c >> 8 & 255, b = c & 255;
 			int veil = n && !sprite_pixel(x, y) ? fog[m->source[row][x] > 6 ? 6 : m->source[row][x]] : 0;
+			/* what a warm light reaches keeps its warmth: no cool shadows, no veil of distance */
+			int warm = 0;
+			for (int i = 0; i < key_count; i++) {
+				float dx = key_lights[i].x - (float)x, dy = key_lights[i].y - (float)y, reach = key_lights[i].reach * 1.35f;
+				float d2 = dx * dx + dy * dy;
+				if (d2 >= reach * reach)
+					continue;
+				float a = 1.0f - __builtin_sqrtf(d2) / reach;
+				int w = (int)(a * a * (3.0f - 2.0f * a) * (float)key_lights[i].warmth);
+				warm = w > warm ? w : warm;
+			}
+			veil = veil * (256 - warm) >> 8;
 			if (veil) {
 				r += (air[0] - r) * veil >> 8;
 				g += (air[1] - g) * veil >> 8;
 				b += (air[2] - b) * veil >> 8;
 			}
-			r = grade_curve[0][r], g = grade_curve[1][g], b = grade_curve[2][b];
+			if (warm) {
+				r = grade_curve[0][r] + ((grade_warm[0][r] - grade_curve[0][r]) * warm >> 8);
+				g = grade_curve[1][g] + ((grade_warm[1][g] - grade_curve[1][g]) * warm >> 8);
+				b = grade_curve[2][b] + ((grade_warm[2][b] - grade_curve[2][b]) * warm >> 8);
+			} else {
+				r = grade_curve[0][r], g = grade_curve[1][g], b = grade_curve[2][b];
+			}
 			int l = (r * 77 + g * 150 + b * 29) >> 8;
 			int v = vignette_x[x] * vy;
 			int o[3] = { l + ((r - l) * 330 >> 8), l + ((g - l) * 330 >> 8), l + ((b - l) * 330 >> 8) };

@@ -126,7 +126,7 @@ def read_lights(path: Path) -> tuple[list[str], dict[str, int]]:
 
 HEADER = """# RemasterIA: the dynamic lights of this game, by tile (tools/remasteria/remasteria/lights.py).
 # key               kind    luma  r   g   b   radius
-# kind: flame, glow, window, none; ? = not reviewed yet (ignored). "-": taken from what is drawn.
+# kind: flame, glow, window, none, water; ? = not reviewed yet (ignored). "-": taken from what is drawn.
 """
 
 
