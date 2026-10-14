@@ -1142,6 +1142,15 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
  * one and how far it is. Flat rings by that distance on the scenery; on a figure, the edge that
  * faces the glow takes its color, the way lava or a bright window rims what stands before it. */
 #define WIDE_REACH 54
+typedef struct {
+	const CoreMotion *m;
+	const Light *lights;
+	int count;
+	uint8_t (*owner)[WIDTH];
+	int16_t (*from_x)[WIDTH], (*from_y)[WIDTH];
+} Wide;
+static void wide_rows(void *context, int y0, int y1);
+
 static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h)
 {
 	static uint8_t owner[MAX_HEIGHT][WIDTH];
@@ -1179,7 +1188,19 @@ static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h
 			light_stack[tail++] = yy * WIDTH + xx;
 		}
 	}
-	for (int y = 0; y < h; y++) {
+	Wide wide = { m, lights, count, owner, from_x, from_y };
+	remaster_bands(h, wide_rows, &wide);
+}
+
+static void wide_rows(void *context, int y0, int y1)
+{
+	const Wide *wd = context;
+	const CoreMotion *m = wd->m;
+	const Light *lights = wd->lights;
+	int count = wd->count;
+	uint8_t (*owner)[WIDTH] = wd->owner;
+	int16_t (*from_x)[WIDTH] = wd->from_x, (*from_y)[WIDTH] = wd->from_y;
+	for (int y = y0; y < y1; y++) {
 		for (int x = 0; x < WIDTH; x++) {
 			if (owner[y][x] == 0xff || !receives[y][x])
 				continue;
@@ -1688,6 +1709,8 @@ static void key_direction(int x, int y, float *lx, float *ly)
 	*lx = k[0] / ll, *ly = k[1] / ll;
 }
 
+static void volume_rows(void *context, int y0, int y1);
+
 static void volume_pass(int h)
 {
 	find_key_field(h);
@@ -1719,7 +1742,13 @@ static void volume_pass(int h)
 				d = 1;
 			depth[y][x] = (uint8_t)d;
 		}
-	for (int y = 0; y < h; y++)
+	remaster_bands(h, volume_rows, &h);
+}
+
+static void volume_rows(void *context, int y0, int y1)
+{
+	int h = *(const int *)context;
+	for (int y = y0; y < y1; y++)
 		for (int x = 0; x < WIDTH; x++) {
 			if (!depth[y][x])
 				continue;
@@ -2077,6 +2106,10 @@ static void shade_strip(unsigned out_w, int x, int y, int side, int k)
 }
 
 static int8_t relief_k[MAX_HEIGHT][WIDTH][4];
+/* what can take relief: the scene and its figures (1) or (2), with the brightness of each */
+static uint8_t kind[MAX_HEIGHT][WIDTH], lum[MAX_HEIGHT][WIDTH];
+static int relief_h;
+static void relief_edges(void *context, int y0, int y1);
 
 static void relief_rows(void *context, int y0, int y1)
 {
@@ -2092,17 +2125,24 @@ static void relief(int h, unsigned out_w)
 {
 	if (SCALE < 4)
 		return;
-	/* what can take relief: the scene and its figures (1) or (2), with the brightness of each */
-	static uint8_t kind[MAX_HEIGHT][WIDTH], lum[MAX_HEIGHT][WIDTH];
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < WIDTH; x++) {
 			kind[y][x] = !graded[y][x] || emits[y][x] || water[y][x] ? 0 : sprite_pixel(x, y) ? 2 : 1;
 			lum[y][x] = (uint8_t)luma_of(grid[y][x]);
 		}
 	memset(relief_k, 0, sizeof relief_k);
+	relief_h = h;
+	remaster_bands(h, relief_edges, NULL);
+	remaster_bands(h, relief_rows, &out_w);
+}
+
+static void relief_edges(void *context, int y0, int y1)
+{
+	(void)context;
+	int h = relief_h;
 	/* left, right, up, down */
 	static const int sdx[4] = { -1, 1, 0, 0 }, sdy[4] = { 0, 0, -1, 1 };
-	for (int y = 1; y + 1 < h; y++)
+	for (int y = y0 < 1 ? 1 : y0; y < y1 && y + 1 < h; y++)
 		for (int x = 1; x + 1 < WIDTH; x++) {
 			int here = kind[y][x];
 			if (!here)
@@ -2134,7 +2174,6 @@ static void relief(int h, unsigned out_w)
 					relief_k[ny][nx][s ^ 1] = (int8_t)(k * facing * 1.2f);
 			}
 		}
-	remaster_bands(h, relief_rows, &out_w);
 }
 
 /* Each character throws a soft round shadow on the ground it stands on, darkest under the
