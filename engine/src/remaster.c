@@ -1563,10 +1563,13 @@ static void environment(int h)
 	}
 }
 
-static void env_tint(int x, int y, int h, int tint[3])
+static void env_box(int x0, int y0, int x1, int y1, int h, int tint[3])
 {
-	int x0 = x - ENV_REACH < 0 ? 0 : x - ENV_REACH, x1 = x + ENV_REACH + 1 > WIDTH ? WIDTH : x + ENV_REACH + 1;
-	int y0 = y - ENV_REACH < 0 ? 0 : y - ENV_REACH, y1 = y + ENV_REACH + 1 > h ? h : y + ENV_REACH + 1;
+	x0 = x0 < 0 ? 0 : x0, x1 = x1 > WIDTH ? WIDTH : x1;
+	y0 = y0 < 0 ? 0 : y0, y1 = y1 > h ? h : y1;
+	tint[0] = tint[1] = tint[2] = 256;
+	if (y1 <= y0 || x1 <= x0)
+		return;
 	int s[4];
 	for (int k = 0; k < 4; k++)
 		s[k] = env_sum[y1][x1][k] - env_sum[y0][x1][k] - env_sum[y1][x0][k] + env_sum[y0][x0][k];
@@ -1582,6 +1585,19 @@ static void env_tint(int x, int y, int h, int tint[3])
 		int t = c3[k] * 256 / l;
 		tint[k] = t < 160 ? 160 : t > 360 ? 360 : t;
 	}
+}
+
+static void env_tint(int x, int y, int h, int tint[3])
+{
+	env_box(x - ENV_REACH, y - ENV_REACH, x + ENV_REACH + 1, y + ENV_REACH + 1, h, tint);
+}
+
+/* The light from above: the color of what is over the figure (the sky outdoors, a lit vault,
+ * the glow of lava behind), so a sunset, a night or a cave each light the top of a body their way. */
+#define SKY_REACH 48
+static void sky_tint(int x, int y, int h, int tint[3])
+{
+	env_box(x - ENV_REACH, y - SKY_REACH, x + ENV_REACH + 1, y - 4, h, tint);
 }
 
 /* Where the light comes from, as a unit vector on the screen: from above, or toward a fire,
@@ -1691,13 +1707,17 @@ static void volume_pass(int h)
 			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
 			uint32_t c = grid[y][x];
 			int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
-			int tint[3];
+			int tint[3], sky[3];
 			env_tint(x, y, h, tint);
+			sky_tint(x, y, h, sky);
 			/* the whole figure a little in the room's color, the side turned away from the key light more */
 			int bounce = 64 + (k < 0 ? -k : 0);
+			float up = -ny / len;
+			int top = up > 0.0f ? (int)(up * 150.0f) : 0;
 			for (int i = 0; i < 3; i++) {
 				o[i] = o[i] * (256 + k) / 256;
 				o[i] += (o[i] * tint[i] / 256 - o[i]) * bounce / 256;
+				o[i] += (o[i] * sky[i] / 256 - o[i]) * top / 256;
 				o[i] = o[i] < 0 ? 0 : o[i] > 255 ? 255 : o[i];
 			}
 			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
@@ -2125,6 +2145,93 @@ static void ground_shadows(const CoreMotion *m, unsigned out_w, unsigned out_h)
 	}
 }
 
+/* Backlight: a figure against bright scenery (sky, a lit wall, lava behind it) takes some of that
+ * light around its edge, fading into the figure over about one console pixel, the way light
+ * wraps a body seen against it. Measured from the outline the figure is drawn with, so it follows
+ * the smoothed silhouette; against dark scenery nothing shows. Scenery means the scene only: never
+ * a window, text or the HUD. */
+#define WRAP_REACH 1.4f
+static int16_t wrap_bg[MAX_HEIGHT][WIDTH][4]; /* color behind, strength 0..256 */
+
+static void wrap_rows(void *context, int y0, int y1)
+{
+	const Canvas *cv = context;
+	unsigned out_w = cv->out_w;
+	int h = cv->height;
+	float inv = 1.0f / (float)SCALE;
+	for (int y = y0; y < y1; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			int a = wrap_bg[y][x][3];
+			if (!a)
+				continue;
+			for (int sy = 0; sy < SCALE; sy++) {
+				float fy = ((float)sy + 0.5f) * inv - 0.5f;
+				int ny = fy < 0 ? y - 1 : y + 1;
+				float wy = fy < 0 ? -fy : fy;
+				uint32_t *line = &image[((size_t)y * SCALE + (unsigned)sy) * out_w + (size_t)x * SCALE];
+				for (int sx = 0; sx < SCALE; sx++) {
+					float fx = ((float)sx + 0.5f) * inv - 0.5f;
+					int nx = fx < 0 ? x - 1 : x + 1;
+					float wx = fx < 0 ? -fx : fx;
+					float d00 = depth[y][x];
+					float d01 = nx >= 0 && nx < WIDTH ? depth[y][nx] : 0.0f;
+					float d10 = ny >= 0 && ny < h ? depth[ny][x] : 0.0f;
+					float d11 = nx >= 0 && nx < WIDTH && ny >= 0 && ny < h ? depth[ny][nx] : 0.0f;
+					float inside = (d00 * (1.0f - wx) + d01 * wx) * (1.0f - wy) + (d10 * (1.0f - wx) + d11 * wx) * wy - 0.5f;
+					if (inside < 0.0f || inside >= WRAP_REACH)
+						continue; /* past the smoothed outline, or deep in the figure */
+					float f = 1.0f - inside / WRAP_REACH;
+					int k = (int)(f * f * (float)a);
+					uint32_t c = line[sx];
+					int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
+					for (int i = 0; i < 3; i++)
+						o[i] += (255 - o[i]) * wrap_bg[y][x][i] / 255 * k >> 8;
+					line[sx] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
+				}
+			}
+		}
+}
+
+static void backlight(int h, unsigned out_w)
+{
+	if (SCALE < 4)
+		return;
+	int half = SCALE / 2;
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			wrap_bg[y][x][3] = 0;
+			if (depth[y][x] < 1 || depth[y][x] > 2)
+				continue;
+			int sum[3] = { 0, 0, 0 }, n = 0;
+			for (int dy = -2; dy <= 2; dy++)
+				for (int dx = -2; dx <= 2; dx++) {
+					int xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= WIDTH || yy >= h || sprite_pixel(xx, yy) || !graded[yy][xx])
+						continue;
+					uint32_t c = image[((size_t)yy * SCALE + (unsigned)half) * out_w + (size_t)xx * SCALE + (unsigned)half];
+					sum[0] += (int)(c >> 16 & 255), sum[1] += (int)(c >> 8 & 255), sum[2] += (int)(c & 255);
+					n++;
+				}
+			if (n < 3)
+				continue;
+			int bg[3] = { sum[0] / n, sum[1] / n, sum[2] / n };
+			int bl = (bg[0] * 77 + bg[1] * 150 + bg[2] * 29) >> 8;
+			uint32_t fc = image[((size_t)y * SCALE + (unsigned)half) * out_w + (size_t)x * SCALE + (unsigned)half];
+			int fl = luma_of(fc);
+			/* brighter behind than the figure, and bright in itself */
+			int lead = bl - fl - 24, bright = bl - 70;
+			if (lead <= 0 || bright <= 0)
+				continue;
+			int a = lead * 2 > 256 ? 256 : lead * 2;
+			a = a * (bright > 110 ? 110 : bright) / 110;
+			a = a * 120 >> 8;
+			wrap_bg[y][x][0] = (int16_t)bg[0], wrap_bg[y][x][1] = (int16_t)bg[1], wrap_bg[y][x][2] = (int16_t)bg[2];
+			wrap_bg[y][x][3] = (int16_t)a;
+		}
+	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
+	remaster_bands(h, wrap_rows, &canvas);
+}
+
 static int scale_hint;
 
 void remaster_use_scale(int scale)
@@ -2221,6 +2328,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	}
 
 	light_pass(m, height, out_w);
+	backlight((int)height, out_w);
 	relief((int)height, out_w);
 	*width = out_w;
 	*out_height = out_h;
