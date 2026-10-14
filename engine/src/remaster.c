@@ -1333,6 +1333,62 @@ static void blocks(unsigned out_w)
 	remaster_bands((int)src_height * SCALE, nearest_rows, &n);
 }
 
+/* A film grade on the scene and its characters: a gentle S curve, cool shadows and warm
+ * highlights, richer color, and the corners falling off. Text, windows, the HUD and its
+ * bars keep the game's own colors. */
+static uint8_t grade_curve[3][256];
+static int vignette_x[WIDTH];
+
+static void grade_init(void)
+{
+	static bool done;
+	if (done)
+		return;
+	done = true;
+	for (int v = 0; v < 256; v++) {
+		float t = (float)v / 255.0f;
+		float s = t * 0.72f + t * t * (3.0f - 2.0f * t) * 0.28f;
+		float low = t * (1.0f - t) * (1.0f - t) * 4.0f, high = t * t * (1.0f - t) * 4.0f;
+		float shift[3] = { 0.035f * high - 0.02f * low, 0.012f * high, 0.045f * low - 0.03f * high };
+		for (int c = 0; c < 3; c++) {
+			float o = (s + shift[c]) * 255.0f + 0.5f;
+			grade_curve[c][v] = (uint8_t)(o < 0 ? 0 : o > 255 ? 255 : o);
+		}
+	}
+	for (int x = 0; x < WIDTH; x++) {
+		float d = ((float)x + 0.5f) / (float)WIDTH * 2.0f - 1.0f;
+		vignette_x[x] = (int)((1.0f - 0.14f * d * d * d * d) * 256.0f);
+	}
+}
+
+/* Before the picture is scaled: one console pixel at a time. The corners fall off smoothly
+ * enough that a step per console pixel never shows. */
+static void grade_pass(const CoreMotion *m, int h)
+{
+	grade_init();
+	find_room(m, h);
+	for (int y = 0; y < h; y++) {
+		int row = y + m->top;
+		float dy = ((float)y + 0.5f) / (float)h * 2.0f - 1.0f;
+		int vy = (int)((1.0f - 0.16f * dy * dy * dy * dy) * 256.0f);
+		for (int x = 0; x < WIDTH; x++) {
+			bool graded = sprite_pixel(x, y) ? sprite_body[y][x] >= 24 : light_plane(m, row, x) && !light_window(m, row, x);
+			if (!graded)
+				continue;
+			uint32_t c = grid[y][x];
+			int r = grade_curve[0][c >> 16 & 255], g = grade_curve[1][c >> 8 & 255], b = grade_curve[2][c & 255];
+			int l = (r * 77 + g * 150 + b * 29) >> 8;
+			int v = vignette_x[x] * vy;
+			int o[3] = { l + ((r - l) * 296 >> 8), l + ((g - l) * 296 >> 8), l + ((b - l) * 296 >> 8) };
+			for (int k = 0; k < 3; k++) {
+				o[k] = o[k] * v >> 16;
+				o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
+			}
+			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
+		}
+	}
+}
+
 static int scale_hint;
 
 void remaster_use_scale(int scale)
@@ -1362,6 +1418,7 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_h = height * SCALE;
 
 	prepare_grid();
+	grade_pass(m, (int)height);
 	blocks(out_w);
 
 	memset(shadowed, 0, (size_t)out_w * out_h);
