@@ -545,6 +545,13 @@ static void emit_rows(void *context, int y0, int y1)
 			emits[y][x] = (uint8_t)emitter(m, y, x);
 }
 
+/* Last frame's lights, for the key light of the figures' volume, drawn before this frame's. */
+typedef struct {
+	float x, y, reach;
+} KeyLight;
+static KeyLight key_lights[LIGHT_MAX];
+static int key_count;
+
 static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 {
 	int h = (int)height;
@@ -880,6 +887,12 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 	 * shadow. A point light (a torch, a lamp) lights in rings from its center, and a figure in
 	 * front of it throws a shadow. */
 	mark_wide(lights, count);
+	key_count = 0;
+	for (int k = 0; k < count && key_count < LIGHT_MAX; k++) {
+		const Light *l = &lights[k];
+		key_lights[key_count++] = (KeyLight){ (float)(l->x0 + l->x1) * 0.5f, (float)(l->y0 + l->y1) * 0.5f,
+			(float)(wide_light(l) ? 96 : l->radius > 24 ? l->radius : 24) };
+	}
 	int points = 0;
 	for (int k = 0; k < count; k++)
 		points += !wide_light(&lights[k]);
@@ -1544,7 +1557,21 @@ static void volume_pass(int h)
 			/* outward normal is against the slope; the key light comes from above and a little left */
 			float nx = (float)-gx, ny = (float)-gy, nz = 4.0f;
 			float len = __builtin_sqrtf(nx * nx + ny * ny + nz * nz);
-			float facing = (nx * -0.35f + ny * -0.8f + nz * 0.49f) / len - 0.49f;
+			/* from above, or toward a fire, lava or window near enough to outshine the sky */
+			float lx = -0.35f, ly = -0.8f, best = 0.0f;
+			for (int i = 0; i < key_count; i++) {
+				float dx = key_lights[i].x - (float)x, dy = key_lights[i].y - (float)y;
+				float d = __builtin_sqrtf(dx * dx + dy * dy);
+				float w = 1.0f - d / (key_lights[i].reach * 1.5f);
+				if (w > best && d > 1.0f) {
+					best = w;
+					lx = -0.35f * (1.0f - w) + dx / d * w;
+					ly = -0.8f * (1.0f - w) + dy / d * w;
+				}
+			}
+			float ll = __builtin_sqrtf(lx * lx + ly * ly);
+			lx = lx / ll * 0.87f, ly = ly / ll * 0.87f;
+			float facing = (nx * lx + ny * ly + nz * 0.49f) / len - 0.49f;
 			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
 			uint32_t c = grid[y][x];
 			int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
