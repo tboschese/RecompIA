@@ -120,9 +120,18 @@ static uint8_t sprite_body[MAX_HEIGHT][WIDTH];
 
 static bool sprite_pixel(int x, int y);
 
+/* Where each character stands: the span of its lower quarter and its lowest row. */
+typedef struct {
+	int x0, x1, y;
+} Feet;
+#define FEET_MAX 32
+static Feet feet[FEET_MAX];
+static int feet_count;
+
 static void prepare_grid(void)
 {
 	int height = (int)src_height;
+	feet_count = 0;
 	for (int y = 0; y < height; y++)
 		for (int x = 0; x < WIDTH; x++)
 			grid[y][x] = at_xy(x, y);
@@ -165,11 +174,19 @@ static void prepare_grid(void)
 			int body = max_y - min_y + 1;
 			if (body > 255)
 				body = 255;
+			int fx0 = WIDTH, fx1 = -1, feet_from = max_y - body / 4;
 			for (int i = 0; i < count; i++) {
 				int pos = sprite_marks[i];
-				int cy = pos / WIDTH;
-				sprite_body[cy][pos - cy * WIDTH] = (uint8_t)body;
+				int cy = pos / WIDTH, cx = pos - cy * WIDTH;
+				sprite_body[cy][cx] = (uint8_t)body;
+				if (cy >= feet_from) {
+					fx0 = cx < fx0 ? cx : fx0;
+					fx1 = cx > fx1 ? cx : fx1;
+				}
 			}
+			/* a shape cut by the edge of the screen, or wider than a person, is scenery or a vehicle */
+			if (body >= 24 && fx0 > 0 && fx1 < WIDTH - 1 && fx1 - fx0 < 48 && feet_count < FEET_MAX)
+				feet[feet_count++] = (Feet){ fx0, fx1, max_y };
 		}
 	}
 }
@@ -1361,6 +1378,72 @@ static void grade_init(void)
 	}
 }
 
+/* Volume: a figure is rounded, thick in the middle and thin at its edge, so its depth is
+ * the distance to its outline. The slope of that depth faces each pixel toward a key light
+ * from above: the top of a shoulder or a head catches it, the underside turns away. One
+ * shade per console pixel, so the drawing stays square. */
+#define VOLUME_DEPTH 7
+static uint8_t depth[MAX_HEIGHT][WIDTH];
+
+static bool figure(int x, int y)
+{
+	return sprite_pixel(x, y) && sprite_body[y][x] >= 24;
+}
+
+static void volume_pass(int h)
+{
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			int d = 0;
+			if (figure(x, y)) {
+				d = VOLUME_DEPTH;
+				if (y > 0 && depth[y - 1][x] + 1 < d)
+					d = depth[y - 1][x] + 1;
+				if (x > 0 && depth[y][x - 1] + 1 < d)
+					d = depth[y][x - 1] + 1;
+				if (y == 0 || x == 0)
+					d = 1;
+			}
+			depth[y][x] = (uint8_t)d;
+		}
+	for (int y = h - 1; y >= 0; y--)
+		for (int x = WIDTH - 1; x >= 0; x--) {
+			int d = depth[y][x];
+			if (!d)
+				continue;
+			if (y + 1 < h && depth[y + 1][x] + 1 < d)
+				d = depth[y + 1][x] + 1;
+			if (x + 1 < WIDTH && depth[y][x + 1] + 1 < d)
+				d = depth[y][x + 1] + 1;
+			if (y + 1 >= h || x + 1 >= WIDTH)
+				d = 1;
+			depth[y][x] = (uint8_t)d;
+		}
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < WIDTH; x++) {
+			if (!depth[y][x])
+				continue;
+			/* the slope over two pixels each side, so a one-pixel notch does not flip it */
+			int gx = 0, gy = 0;
+			for (int k = 1; k <= 2; k++) {
+				gx += (x + k < WIDTH ? depth[y][x + k] : 0) - (x - k >= 0 ? depth[y][x - k] : 0);
+				gy += (y + k < h ? depth[y + k][x] : 0) - (y - k >= 0 ? depth[y - k][x] : 0);
+			}
+			/* outward normal is against the slope; the key light comes from above and a little left */
+			float nx = (float)-gx, ny = (float)-gy, nz = 4.0f;
+			float len = __builtin_sqrtf(nx * nx + ny * ny + nz * nz);
+			float facing = (nx * -0.35f + ny * -0.8f + nz * 0.49f) / len - 0.49f;
+			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
+			uint32_t c = grid[y][x];
+			int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
+			for (int i = 0; i < 3; i++) {
+				o[i] = o[i] * (256 + k) / 256;
+				o[i] = o[i] < 0 ? 0 : o[i] > 255 ? 255 : o[i];
+			}
+			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
+		}
+}
+
 /* Before the picture is scaled: one console pixel at a time. The corners fall off smoothly
  * enough that a step per console pixel never shows. */
 static void grade_pass(const CoreMotion *m, int h)
@@ -1385,6 +1468,46 @@ static void grade_pass(const CoreMotion *m, int h)
 				o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
 			}
 			grid[y][x] = (c & 0xff000000u) | (uint32_t)o[0] << 16 | (uint32_t)o[1] << 8 | (uint32_t)o[2];
+		}
+	}
+}
+
+/* Each character throws a soft round shadow on the ground it stands on, darkest under the
+ * feet and fading to nothing, on the scenery only: never on a figure, a window or a glow. */
+static void ground_shadows(const CoreMotion *m, unsigned out_w, unsigned out_h)
+{
+	for (int i = 0; i < feet_count; i++) {
+		const Feet *f = &feet[i];
+		float cx = (float)(f->x0 + f->x1 + 1) * 0.5f * (float)SCALE;
+		float cy = ((float)f->y + 0.7f) * (float)SCALE;
+		float rx = (float)(f->x1 - f->x0 + 1) * 0.85f * (float)SCALE;
+		if (rx < 7.0f * (float)SCALE)
+			rx = 7.0f * (float)SCALE;
+		float ry = rx * 0.3f;
+		int x0 = (int)(cx - rx), x1 = (int)(cx + rx), y0 = (int)(cy - ry), y1 = (int)(cy + ry);
+		x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
+		x1 = x1 >= (int)out_w ? (int)out_w - 1 : x1, y1 = y1 >= (int)out_h ? (int)out_h - 1 : y1;
+		for (int sy = y0 / SCALE; sy <= y1 / SCALE; sy++) {
+			int row = sy + m->top;
+			for (int sx = x0 / SCALE; sx <= x1 / SCALE; sx++) {
+				if (sprite_pixel(sx, sy) || m->source[row][sx] > 3 || light_window(m, row, sx) || emitter(m, sy, sx))
+					continue;
+				for (int py = sy * SCALE; py < (sy + 1) * SCALE; py++) {
+					float dy = ((float)py + 0.5f - cy) / ry;
+					uint32_t *line = &image[(size_t)py * out_w];
+					for (int px = sx * SCALE; px < (sx + 1) * SCALE; px++) {
+						float dx = ((float)px + 0.5f - cx) / rx, d = dx * dx + dy * dy;
+						if (d >= 1.0f)
+							continue;
+						float a = (1.0f - d) * (1.0f - d);
+						int k = (int)(a * 130.0f);
+						uint32_t c = line[px];
+						int r = (int)(c >> 16 & 255) * (256 - k) >> 8, g = (int)(c >> 8 & 255) * (256 - k * 15 / 16) >> 8;
+						int b = (int)(c & 255) * (256 - k * 7 / 8) >> 8;
+						line[px] = (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+					}
+				}
+			}
 		}
 	}
 }
@@ -1418,8 +1541,10 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_h = height * SCALE;
 
 	prepare_grid();
+	volume_pass((int)height);
 	grade_pass(m, (int)height);
 	blocks(out_w);
+	ground_shadows(m, out_w, out_h);
 
 	memset(shadowed, 0, (size_t)out_w * out_h);
 	for (unsigned y = 0; y + 1 < height; y++) {
