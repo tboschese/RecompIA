@@ -1015,7 +1015,8 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 					continue;
 				float d = reach_d[dy + REACH][dx + REACH];
 				float a = 1.0f - d / (float)radius;
-				float ring = a * 4.0f;
+				/* smoothstep: the pool fades out with no slope at its edge, so no rim shows */
+				float ring = a * a * (3.0f - 2.0f * a) * 4.0f;
 				if (ring <= 0.0f)
 					continue;
 				int k; /* in hundredths of the light's color */
@@ -1128,7 +1129,8 @@ static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h
 				continue; /* the picture of the light itself (a stained glass, the crust on lava) stays as drawn */
 			int dx = from_x[y][x] - x, dy = from_y[y][x] - y;
 			float d = __builtin_sqrtf((float)(dx * dx + dy * dy));
-			float ring = (1.0f - d / (float)WIDE_REACH) * 4.0f;
+			float wa = 1.0f - d / (float)WIDE_REACH;
+			float ring = wa * wa * (3.0f - 2.0f * wa) * 4.0f;
 			if (ring <= 0.0f)
 				continue;
 			int power = l->flame ? 90 + (int)(light_hash(m->frame / 6 * 131u + owner[y][x] * 977u) % 11) : 100;
@@ -1339,6 +1341,21 @@ static void corner_light(int x, int y, int here, int h, int out[9])
 		out[c] = out[c] * 64;
 }
 
+static inline uint32_t lit_color(uint32_t c, const int *v)
+{
+	int r = ((int)(c >> 16 & 255) * v[0] >> 16) + (v[3] >> 8);
+	int g = ((int)(c >> 8 & 255) * v[1] >> 16) + (v[4] >> 8);
+	int b = ((int)(c & 255) * v[2] >> 16) + (v[5] >> 8);
+	r = r > 255 ? 255 : r;
+	g = g > 255 ? 255 : g;
+	b = b > 255 ? 255 : b;
+	/* the halo lifts what is dark and leaves what is bright, so a fire keeps its drawing */
+	r += (v[6] >> 8) * (255 - r) >> 8;
+	g += (v[7] >> 8) * (255 - g) >> 8;
+	b += (v[8] >> 8) * (255 - b) >> 8;
+	return (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+}
+
 static void apply_rows(void *context, int y0, int y1)
 {
 	unsigned out_w = ((const Canvas *)context)->out_w;
@@ -1366,7 +1383,11 @@ static void apply_rows(void *context, int y0, int y1)
 				for (int i = 0; i < 4 && channels == 6; i++)
 					if (k[i][6] | k[i][7] | k[i][8])
 						channels = 9;
-			int inv = 65536 / SCALE;
+			/* One light value per cell of 2x2 screen pixels (a quarter of a console pixel at 8x,
+			 * finer than any step shows). The block is the console pixel's one color, so its lit
+			 * color is worked out once per cell; only a pixel a shadow changed is lit on its own. */
+			int cell = SCALE % 2 == 0 && SCALE >= 4 ? 2 : 1, cells = SCALE / cell;
+			int inv = 65536 / cells;
 			int lcol[9], rcol[9], ldn[9], rdn[9];
 			for (int c = 0; c < channels; c++) {
 				ldn[c] = (int)(((long long)(k[2][c] - k[0][c]) * inv) >> 16);
@@ -1374,7 +1395,8 @@ static void apply_rows(void *context, int y0, int y1)
 				lcol[c] = k[0][c] + ldn[c] / 2;
 				rcol[c] = k[1][c] + rdn[c] / 2;
 			}
-			for (int sy = 0; sy < SCALE; sy++) {
+			uint32_t block = grid[y][x];
+			for (int cy = 0; cy < cells; cy++) {
 				int v[9], step[9];
 				for (int c = 0; c < channels; c++) {
 					step[c] = (int)(((long long)(rcol[c] - lcol[c]) * inv) >> 16);
@@ -1384,22 +1406,17 @@ static void apply_rows(void *context, int y0, int y1)
 				}
 				for (int c = channels; c < 9; c++)
 					v[c] = step[c] = 0;
-				uint32_t *p = &image[((size_t)y * SCALE + (unsigned)sy) * out_w + (size_t)x * SCALE];
-				for (int sx = 0; sx < SCALE; sx++) {
-					uint32_t c = p[sx];
-					int r = ((int)(c >> 16 & 255) * v[0] >> 16) + (v[3] >> 8);
-					int g = ((int)(c >> 8 & 255) * v[1] >> 16) + (v[4] >> 8);
-					int b = ((int)(c & 255) * v[2] >> 16) + (v[5] >> 8);
-					r = r > 255 ? 255 : r;
-					g = g > 255 ? 255 : g;
-					b = b > 255 ? 255 : b;
-					/* the halo lifts what is dark and leaves what is bright, so a fire keeps its drawing */
-					r += (v[6] >> 8) * (255 - r) >> 8;
-					g += (v[7] >> 8) * (255 - g) >> 8;
-					b += (v[8] >> 8) * (255 - b) >> 8;
-					p[sx] = (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
-					for (int i = 0; i < 9; i++)
-						v[i] += step[i];
+				int at[REMASTER_SCALE_MAX][9];
+				uint32_t done[REMASTER_SCALE_MAX];
+				for (int cx = 0; cx < cells; cx++) {
+					for (int c = 0; c < 9; c++)
+						at[cx][c] = v[c] + cx * step[c];
+					done[cx] = lit_color(block, at[cx]);
+				}
+				for (int j = 0; j < cell; j++) {
+					uint32_t *p = &image[((size_t)y * SCALE + (unsigned)(cy * cell + j)) * out_w + (size_t)x * SCALE];
+					for (int sx = 0; sx < SCALE; sx++)
+						p[sx] = p[sx] == block ? done[sx / cell] : lit_color(p[sx], at[sx / cell]);
 				}
 			}
 		}
