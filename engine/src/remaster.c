@@ -18,7 +18,7 @@ static uint8_t shadowed[MAX_HEIGHT * REMASTER_SCALE_MAX * WIDTH * REMASTER_SCALE
 static int scale = REMASTER_SCALE;
 #define SCALE scale
 
-#define BANDS 8
+#define BANDS 32
 typedef struct {
 	RowsFn *rows;
 	void *context;
@@ -508,6 +508,8 @@ static unsigned light_hash(unsigned v)
 }
 
 static void apply_rows(void *context, int y0, int y1);
+static void settle_rows(void *context, int y0, int y1);
+static void find_bloom(int h);
 static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h);
 
 static void emit_rows(void *context, int y0, int y1)
@@ -975,8 +977,8 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 					continue;
 				float d = reach_d[dy + REACH][dx + REACH];
 				float a = 1.0f - d / (float)radius;
-				int ring = (int)(a * 4.0f + 0.75f); /* flat rings: 0..4 */
-				if (ring <= 0)
+				float ring = a * 4.0f;
+				if (ring <= 0.0f)
 					continue;
 				int k; /* in hundredths of the light's color */
 				if (sprite_pixel(x, y)) {
@@ -1024,6 +1026,8 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 		wide_pass(m, lights, count, h);
 
 	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
+	remaster_bands(h, settle_rows, NULL);
+	find_bloom(h);
 	remaster_bands(h, apply_rows, &canvas);
 }
 
@@ -1080,8 +1084,8 @@ static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h
 				continue; /* the picture of the light itself (a stained glass, the crust on lava) stays as drawn */
 			int dx = from_x[y][x] - x, dy = from_y[y][x] - y;
 			float d = __builtin_sqrtf((float)(dx * dx + dy * dy));
-			int ring = (int)((1.0f - d / (float)WIDE_REACH) * 4.0f + 0.75f);
-			if (ring <= 0)
+			float ring = (1.0f - d / (float)WIDE_REACH) * 4.0f;
+			if (ring <= 0.0f)
 				continue;
 			int power = l->flame ? 90 + (int)(light_hash(m->frame / 6 * 131u + owner[y][x] * 977u) % 11) : 100;
 			if (l->life < GLOW_HOLD)
@@ -1096,7 +1100,7 @@ static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h
 				if (sprite_body[y][x] < 14)
 					k = ring * 12;
 				else if (!sprite_pixel(tx, ty))
-					k = 40 + ring * 24; /* the edge that faces the glow */
+					k = 30 + ring * 16; /* the edge that faces the glow */
 				else
 					k = ring * 8;
 			} else {
@@ -1114,15 +1118,31 @@ static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h
 	}
 }
 
-static void apply_rows(void *context, int y0, int y1)
+/* What each console pixel ends up with: a gain per channel (256 leaves it) and a color added on
+ * top, and which surface it belongs to. On screen the light runs smoothly from one console pixel's
+ * center to the next, but never across the edge of a figure or into a window. */
+static int16_t lit[MAX_HEIGHT][WIDTH][6];
+static uint8_t surface[MAX_HEIGHT][WIDTH];
+static bool lit_any[MAX_HEIGHT][WIDTH];
+/* The soft halo a bright fire, lava or spell throws past its own pixels. */
+static int16_t bloom[MAX_HEIGHT][WIDTH][3];
+#define BLOOM_REACH 6
+
+static void settle_rows(void *context, int y0, int y1)
 {
-	unsigned out_w = ((const Canvas *)context)->out_w;
+	(void)context;
 	for (int y = y0; y < y1; y++) {
 		for (int x = 0; x < WIDTH; x++) {
+			surface[y][x] = (uint8_t)(sprite_pixel(x, y) ? 1 : receives[y][x] || emits[y][x] ? 0 : 2);
 			int gr = gain[y][x][0], gg = gain[y][x][1], gb = gain[y][x][2];
 			int ar = glow[y][x][0], ag = glow[y][x][1], ab = glow[y][x][2];
-			if (gr == 256 && gg == 256 && gb == 256 && (ar | ag | ab) == 0)
+			int16_t *o = lit[y][x];
+			lit_any[y][x] = !(gr == 256 && gg == 256 && gb == 256 && (ar | ag | ab) == 0);
+			if (!lit_any[y][x]) {
+				o[0] = o[1] = o[2] = 256;
+				o[3] = o[4] = o[5] = 0;
 				continue;
+			}
 			int g3[3] = { gr, gg, gb };
 			for (int c = 0; c < 3; c++) {
 				if (g3[c] < 140)
@@ -1147,20 +1167,142 @@ static void apply_rows(void *context, int y0, int y1)
 				ag = ag * room / add;
 				ab = ab * room / add;
 			}
+			o[0] = (int16_t)g3[0], o[1] = (int16_t)g3[1], o[2] = (int16_t)g3[2];
+			o[3] = (int16_t)ar, o[4] = (int16_t)ag, o[5] = (int16_t)ab;
+		}
+	}
+}
+
+static void find_bloom(int h)
+{
+	static int16_t across[MAX_HEIGHT][WIDTH][3];
+	for (int y = 0; y < h; y++) {
+		int sum[3] = { 0, 0, 0 };
+		int src[WIDTH][3];
+		for (int x = 0; x < WIDTH; x++) {
+			uint32_t c = at_xy(x, y);
+			bool hot = emits[y][x] && luma_of(c) >= 110;
+			src[x][0] = hot ? (int)(c >> 16 & 255) : 0;
+			src[x][1] = hot ? (int)(c >> 8 & 255) : 0;
+			src[x][2] = hot ? (int)(c & 255) : 0;
+		}
+		for (int x = -BLOOM_REACH; x < WIDTH; x++) {
+			int in = x + BLOOM_REACH, out = x - BLOOM_REACH - 1;
+			for (int c = 0; c < 3; c++) {
+				if (in < WIDTH)
+					sum[c] += src[in][c];
+				if (out >= 0)
+					sum[c] -= src[out][c];
+			}
+			if (x >= 0)
+				for (int c = 0; c < 3; c++)
+					across[y][x][c] = (int16_t)(sum[c] / (2 * BLOOM_REACH + 1));
+		}
+	}
+	for (int x = 0; x < WIDTH; x++) {
+		int sum[3] = { 0, 0, 0 };
+		for (int y = -BLOOM_REACH; y < h; y++) {
+			int in = y + BLOOM_REACH, out = y - BLOOM_REACH - 1;
+			for (int c = 0; c < 3; c++) {
+				if (in < h)
+					sum[c] += across[in][x][c];
+				if (out >= 0)
+					sum[c] -= across[out][x][c];
+			}
+			if (y >= 0)
+				for (int c = 0; c < 3; c++)
+					bloom[y][x][c] = (int16_t)(sum[c] * 2 / (5 * (2 * BLOOM_REACH + 1)));
+		}
+	}
+}
+
+/* The light at a corner shared by four console pixels, as seen from one surface: the mean of
+ * those of the four on it. */
+static void corner_light(int x, int y, int here, int h, int out[9])
+{
+	int n = 0;
+	for (int c = 0; c < 9; c++)
+		out[c] = 0;
+	for (int dy = -1; dy <= 0; dy++)
+		for (int dx = -1; dx <= 0; dx++) {
+			int yy = y + dy, xx = x + dx;
+			if (yy < 0 || xx < 0 || yy >= h || xx >= WIDTH)
+				continue;
+			for (int c = 0; c < 3; c++)
+				out[6 + c] += bloom[yy][xx][c];
+			if (surface[yy][xx] != here)
+				continue;
+			for (int c = 0; c < 6; c++)
+				out[c] += lit[yy][xx][c];
+			n++;
+		}
+	for (int c = 0; c < 6; c++)
+		out[c] = n ? out[c] * 256 / n : 0;
+	for (int c = 6; c < 9; c++)
+		out[c] = out[c] * 64;
+}
+
+static void apply_rows(void *context, int y0, int y1)
+{
+	unsigned out_w = ((const Canvas *)context)->out_w;
+	int h = ((const Canvas *)context)->height;
+	for (int y = y0; y < y1; y++) {
+		for (int x = 0; x < WIDTH; x++) {
+			bool any = false;
+			for (int dy = -1; dy <= 1 && !any; dy++)
+				for (int dx = -1; dx <= 1 && !any; dx++) {
+					int yy = y + dy, xx = x + dx;
+					any = yy >= 0 && xx >= 0 && yy < h && xx < WIDTH && (lit_any[yy][xx] || bloom[yy][xx][0] | bloom[yy][xx][1] | bloom[yy][xx][2]);
+				}
+			if (!any)
+				continue;
+			int here = surface[y][x];
+			int k[4][9];
+			corner_light(x, y, here, h, k[0]);
+			corner_light(x + 1, y, here, h, k[1]);
+			corner_light(x, y + 1, here, h, k[2]);
+			corner_light(x + 1, y + 1, here, h, k[3]);
+			/* Bloom lies around a fire, lava or a spell, not on it, and never on a window. */
+			bool halo = here != 2 && !emits[y][x];
+			int channels = 6;
+			if (halo)
+				for (int i = 0; i < 4 && channels == 6; i++)
+					if (k[i][6] | k[i][7] | k[i][8])
+						channels = 9;
+			int inv = 65536 / SCALE;
+			int lcol[9], rcol[9], ldn[9], rdn[9];
+			for (int c = 0; c < channels; c++) {
+				ldn[c] = (int)(((long long)(k[2][c] - k[0][c]) * inv) >> 16);
+				rdn[c] = (int)(((long long)(k[3][c] - k[1][c]) * inv) >> 16);
+				lcol[c] = k[0][c] + ldn[c] / 2;
+				rcol[c] = k[1][c] + rdn[c] / 2;
+			}
 			for (int sy = 0; sy < SCALE; sy++) {
+				int v[9], step[9];
+				for (int c = 0; c < channels; c++) {
+					step[c] = (int)(((long long)(rcol[c] - lcol[c]) * inv) >> 16);
+					v[c] = lcol[c] + step[c] / 2;
+					lcol[c] += ldn[c];
+					rcol[c] += rdn[c];
+				}
+				for (int c = channels; c < 9; c++)
+					v[c] = step[c] = 0;
 				uint32_t *p = &image[((size_t)y * SCALE + (unsigned)sy) * out_w + (size_t)x * SCALE];
 				for (int sx = 0; sx < SCALE; sx++) {
 					uint32_t c = p[sx];
-					int r = ((int)(c >> 16 & 255) * g3[0] >> 8) + ar;
-					int g = ((int)(c >> 8 & 255) * g3[1] >> 8) + ag;
-					int b = ((int)(c & 255) * g3[2] >> 8) + ab;
-					if (r > 255)
-						r = 255;
-					if (g > 255)
-						g = 255;
-					if (b > 255)
-						b = 255;
+					int r = ((int)(c >> 16 & 255) * v[0] >> 16) + (v[3] >> 8);
+					int g = ((int)(c >> 8 & 255) * v[1] >> 16) + (v[4] >> 8);
+					int b = ((int)(c & 255) * v[2] >> 16) + (v[5] >> 8);
+					r = r > 255 ? 255 : r;
+					g = g > 255 ? 255 : g;
+					b = b > 255 ? 255 : b;
+					/* the halo lifts what is dark and leaves what is bright, so a fire keeps its drawing */
+					r += (v[6] >> 8) * (255 - r) >> 8;
+					g += (v[7] >> 8) * (255 - g) >> 8;
+					b += (v[8] >> 8) * (255 - b) >> 8;
 					p[sx] = (c & 0xff000000u) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+					for (int i = 0; i < 9; i++)
+						v[i] += step[i];
 				}
 			}
 		}
@@ -1236,10 +1378,18 @@ static void mmpx_rows(void *context, int y0, int y1)
 #define NONE4(b, a0, a1, a2, a3) ((b) != (a0) && (b) != (a1) && (b) != (a2) && (b) != (a3))
 	for (int y = y0; y < y1; y++) {
 		uint32_t *out = p->dst + (size_t)(2 * y) * p->dst_stride;
+		const uint32_t *up = s + (size_t)(y > 0 ? y - 1 : 0) * (size_t)w;
+		const uint32_t *mid = s + (size_t)y * (size_t)w;
+		const uint32_t *down = s + (size_t)(y + 1 < h ? y + 1 : h - 1) * (size_t)w;
 		for (int x = 0; x < w; x++) {
-			uint32_t A = PX(-1, -1), B = PX(0, -1), C = PX(1, -1);
-			uint32_t D = PX(-1, 0), E = PX(0, 0), F = PX(1, 0);
-			uint32_t G = PX(-1, 1), H = PX(0, 1), I = PX(1, 1);
+			int xl = x > 0 ? x - 1 : 0, xr = x + 1 < w ? x + 1 : w - 1;
+			uint32_t A = up[xl], B = up[x], C = up[xr];
+			uint32_t D = mid[xl], E = mid[x], F = mid[xr];
+			uint32_t G = down[xl], H = down[x], I = down[xr];
+			if (((A ^ E) | (B ^ E) | (C ^ E) | (D ^ E) | (F ^ E) | (G ^ E) | (H ^ E) | (I ^ E)) == 0) {
+				out[2 * x] = out[2 * x + 1] = out[p->dst_stride + 2 * x] = out[p->dst_stride + 2 * x + 1] = E;
+				continue;
+			}
 			uint32_t J = E, K = E, L = E, M = E;
 			uint32_t around[8] = { A, B, C, D, F, G, H, I };
 			bool keep = dither[y / p->factor][x / p->factor] || (p->factor > 1 && !two_colors(E, around, 8));
