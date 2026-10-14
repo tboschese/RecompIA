@@ -43,9 +43,6 @@ void remaster_bands(int height, RowsFn *rows, void *context)
 		band(&b, i);
 #endif
 }
-/* The neighbor's shaded color, sampled before any stair. A later stair must not
- * copy a corner a previous stair already replaced. */
-static uint32_t stair_color[MAX_HEIGHT][WIDTH];
 
 /* Flat step, same hue: 100 leaves the color, above 100 lightens, below darkens.
  * Multiplying keeps a dark boot dark-brown instead of clipping it to black. */
@@ -115,124 +112,13 @@ static uint32_t at_xy(int x, int y)
 }
 
 
-/* Run length of each console pixel, capped. A letter is one pixel wide, so it
- * never reaches 3. Built once per frame: walking the run again from every pixel
- * was most of the cost. */
+/* The picture as the game drew it, one console pixel per cell. */
 static uint32_t grid[MAX_HEIGHT][WIDTH];
-static uint8_t wide_run[MAX_HEIGHT][WIDTH];
-static bool field[MAX_HEIGHT][WIDTH]; /* a flat color across half the screen */
-static uint8_t tall_run[MAX_HEIGHT][WIDTH];
-static uint8_t run_at[MAX_HEIGHT][WIDTH]; /* rows down from the top of the color run */
-/* Where this pixel sits in the sprite silhouette, not in a run of one color.
- * A character is many colors wide; a letter is one pixel wide. */
-static uint8_t sprite_above[MAX_HEIGHT][WIDTH];
-static uint8_t sprite_below[MAX_HEIGHT][WIDTH];
-static uint8_t sprite_left[MAX_HEIGHT][WIDTH];
-static uint8_t sprite_right[MAX_HEIGHT][WIDTH];
 /* Height of the connected sprite. A letter is a short shape; a character is tall,
  * so a one-pixel hair column still belongs to the character. */
 static uint8_t sprite_body[MAX_HEIGHT][WIDTH];
-/* A warm cliff is many colors. The column of the body, not of one stripe, carries the light. */
-static uint8_t warm_above[MAX_HEIGHT][WIDTH];
-static uint8_t warm_below[MAX_HEIGHT][WIDTH];
-/* A letter of any width, with the one-pixel outline around it: a small white shape with a dark
- * outline or drop shadow on at least a quarter of its border, on a window that is not dark. It
- * keeps every pixel the game drew. */
-static bool glyph[MAX_HEIGHT][WIDTH];
 
 static bool sprite_pixel(int x, int y);
-static bool warm_body(uint32_t color);
-static int luma_of(uint32_t color);
-
-static bool letter_ink(uint32_t color)
-{
-	int r = (int)(color >> 16 & 255), g = (int)(color >> 8 & 255), b = (int)(color & 255);
-	int lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
-	int hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
-	return lo >= 180 && hi - lo <= 24;
-}
-
-static void find_glyphs(int height)
-{
-	enum { MAX_W = 12, MAX_H = 16, MAX_INK = 120 };
-	static uint8_t seen[MAX_HEIGHT][WIDTH];
-	static int stack[WIDTH * MAX_HEIGHT], marks[WIDTH * MAX_HEIGHT];
-	memset(seen, 0, sizeof seen);
-	memset(glyph, 0, sizeof glyph);
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH; x++) {
-			if (seen[y][x] || !letter_ink(grid[y][x]))
-				continue;
-			int top = 0, count = 0;
-			int min_x = x, max_x = x, min_y = y, max_y = y;
-			stack[top++] = y * WIDTH + x;
-			seen[y][x] = 1;
-			while (top > 0) {
-				int pos = stack[--top];
-				marks[count++] = pos;
-				int cy = pos / WIDTH, cx = pos - cy * WIDTH;
-				min_x = cx < min_x ? cx : min_x, max_x = cx > max_x ? cx : max_x;
-				min_y = cy < min_y ? cy : min_y, max_y = cy > max_y ? cy : max_y;
-				for (int dy = -1; dy <= 1; dy++)
-					for (int dx = -1; dx <= 1; dx++) {
-						int ny = cy + dy, nx = cx + dx;
-						if (ny < 0 || nx < 0 || ny >= height || nx >= WIDTH || seen[ny][nx] || !letter_ink(grid[ny][nx]))
-							continue;
-						seen[ny][nx] = 1;
-						stack[top++] = ny * WIDTH + nx;
-					}
-			}
-			if (max_x - min_x >= MAX_W || max_y - min_y >= MAX_H || count > MAX_INK)
-				continue;
-			bool character = false;
-			for (int i = 0; i < count && !character; i++) {
-				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
-				character = sprite_pixel(cx, cy) && sprite_body[cy][cx] >= 14;
-			}
-			if (character)
-				continue; /* a highlight on a character, who is lit as a body */
-			int border = 0, dark = 0;
-			for (int i = 0; i < count; i++) {
-				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
-				for (int dy = -1; dy <= 1; dy++)
-					for (int dx = -1; dx <= 1; dx++) {
-						int ny = cy + dy, nx = cx + dx;
-						if (ny < 0 || nx < 0 || ny >= height || nx >= WIDTH || letter_ink(grid[ny][nx]))
-							continue;
-						border++;
-						dark += luma_of(grid[ny][nx]) < 70;
-					}
-			}
-			if (border == 0 || dark * 4 < border)
-				continue;
-			/* Past the outline a letter sits on its window. Art in a black void has only dark there. */
-			int panel = 0, lit = 0;
-			for (int i = 0; i < count; i++) {
-				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
-				for (int dy = -2; dy <= 2; dy++)
-					for (int dx = -2; dx <= 2; dx++) {
-						int ny = cy + dy, nx = cx + dx;
-						if ((dy > -2 && dy < 2 && dx > -2 && dx < 2) || ny < 0 || nx < 0 || ny >= height || nx >= WIDTH
-							|| letter_ink(grid[ny][nx]))
-							continue;
-						panel++;
-						lit += luma_of(grid[ny][nx]) >= 28;
-					}
-			}
-			if (lit * 10 < panel * 3)
-				continue;
-			for (int i = 0; i < count; i++) {
-				int cy = marks[i] / WIDTH, cx = marks[i] - cy * WIDTH;
-				for (int dy = -1; dy <= 1; dy++)
-					for (int dx = -1; dx <= 1; dx++) {
-						int ny = cy + dy, nx = cx + dx;
-						if (ny >= 0 && nx >= 0 && ny < height && nx < WIDTH)
-							glyph[ny][nx] = true;
-					}
-			}
-		}
-	}
-}
 
 static void prepare_grid(void)
 {
@@ -240,145 +126,6 @@ static void prepare_grid(void)
 	for (int y = 0; y < height; y++)
 		for (int x = 0; x < WIDTH; x++)
 			grid[y][x] = at_xy(x, y);
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH;) {
-			int end = x + 1;
-			while (end < WIDTH && end - x < 255 && grid[y][end] == grid[y][x])
-				end++;
-			uint8_t len = (uint8_t)(end - x);
-			for (int i = x; i < end; i++)
-				wide_run[y][i] = len;
-			x = end;
-		}
-	}
-	for (int x = 0; x < WIDTH; x++) {
-		for (int y = 0; y < height;) {
-			int end = y + 1;
-			while (end < height && end - y < 255 && grid[end][x] == grid[y][x])
-				end++;
-			uint8_t len = (uint8_t)(end - y);
-			for (int i = y; i < end; i++) {
-				tall_run[i][x] = len;
-				run_at[i][x] = (uint8_t)(i - y);
-			}
-			y = end;
-		}
-	}
-	for (int x = 0; x < WIDTH; x++) {
-		for (int y = 0; y < height;) {
-			if (!sprite_pixel(x, y)) {
-				sprite_above[y][x] = sprite_below[y][x] = 0;
-				y++;
-				continue;
-			}
-			int end = y + 1;
-			while (end < height && sprite_pixel(x, end))
-				end++;
-			for (int i = y; i < end; i++) {
-				sprite_above[i][x] = (uint8_t)(i - y);
-				sprite_below[i][x] = (uint8_t)(end - 1 - i);
-			}
-			y = end;
-		}
-	}
-	for (int x = 0; x < WIDTH; x++) {
-		for (int y = 0; y < height;) {
-			if (!warm_body(grid[y][x])) {
-				warm_above[y][x] = warm_below[y][x] = 0;
-				y++;
-				continue;
-			}
-			int end = y + 1;
-			while (end < height && warm_body(grid[end][x]))
-				end++;
-			for (int i = y; i < end; i++) {
-				warm_above[i][x] = (uint8_t)(i - y);
-				warm_below[i][x] = (uint8_t)(end - 1 - i);
-			}
-			y = end;
-		}
-	}
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH;) {
-			if (!sprite_pixel(x, y)) {
-				sprite_left[y][x] = sprite_right[y][x] = 0;
-				x++;
-				continue;
-			}
-			int end = x + 1;
-			while (end < WIDTH && sprite_pixel(end, y))
-				end++;
-			for (int i = x; i < end; i++) {
-				sprite_left[y][i] = (uint8_t)(i - x);
-				sprite_right[y][i] = (uint8_t)(end - 1 - i);
-			}
-			x = end;
-		}
-	}
-	/* One flat color reaching across half the screen is a field (a sky on a layer, a wall of
-	 * one color), even where a bar or a letter cuts it into short columns. Runs of one color
-	 * in a row join the runs of that color they touch in the row above. */
-	static int seg_x0[WIDTH * MAX_HEIGHT], seg_x1[WIDTH * MAX_HEIGHT], seg_up[WIDTH * MAX_HEIGHT];
-	static int row_seg[MAX_HEIGHT + 1];
-	int segs = 0;
-	for (int y = 0; y < height; y++) {
-		row_seg[y] = segs;
-		for (int x = 0; x < WIDTH;) {
-			if (sprite_pixel(x, y)) {
-				x++;
-				continue;
-			}
-			int end = x + 1;
-			while (end < WIDTH && grid[y][end] == grid[y][x] && !sprite_pixel(end, y))
-				end++;
-			seg_x0[segs] = x;
-			seg_x1[segs] = end - 1;
-			seg_up[segs] = segs;
-			segs++;
-			x = end;
-		}
-	}
-	row_seg[height] = segs;
-	for (int y = 1; y < height; y++) {
-		int a = row_seg[y - 1];
-		for (int i = row_seg[y]; i < row_seg[y + 1]; i++) {
-			while (a < row_seg[y] && seg_x1[a] < seg_x0[i])
-				a++;
-			for (int j = a; j < row_seg[y] && seg_x0[j] <= seg_x1[i]; j++) {
-				if (grid[y - 1][seg_x0[j]] != grid[y][seg_x0[i]])
-					continue;
-				int ri = i, rj = j;
-				while (seg_up[ri] != ri)
-					ri = seg_up[ri] = seg_up[seg_up[ri]];
-				while (seg_up[rj] != rj)
-					rj = seg_up[rj] = seg_up[seg_up[rj]];
-				if (ri != rj)
-					seg_up[ri > rj ? ri : rj] = ri < rj ? ri : rj;
-			}
-		}
-	}
-	static int root_x0[WIDTH * MAX_HEIGHT], root_x1[WIDTH * MAX_HEIGHT];
-	for (int i = 0; i < segs; i++) {
-		int r = i;
-		while (seg_up[r] != r)
-			r = seg_up[r];
-		seg_up[i] = r;
-		if (r == i) {
-			root_x0[i] = seg_x0[i];
-			root_x1[i] = seg_x1[i];
-		} else {
-			root_x0[r] = seg_x0[i] < root_x0[r] ? seg_x0[i] : root_x0[r];
-			root_x1[r] = seg_x1[i] > root_x1[r] ? seg_x1[i] : root_x1[r];
-		}
-	}
-	memset(field, 0, sizeof field);
-	for (int y = 0; y < height; y++)
-		for (int i = row_seg[y]; i < row_seg[y + 1]; i++) {
-			int r = seg_up[i];
-			if (root_x1[r] - root_x0[r] + 1 >= WIDTH / 2)
-				for (int x = seg_x0[i]; x <= seg_x1[i]; x++)
-					field[y][x] = true;
-		}
 	/* One flood per sprite, then every pixel of it learns the shape's height. */
 	memset(sprite_body, 0, sizeof sprite_body);
 	static int sprite_stack[WIDTH * MAX_HEIGHT];
@@ -425,7 +172,6 @@ static void prepare_grid(void)
 			}
 		}
 	}
-	find_glyphs(height);
 }
 
 static bool sprite_pixel(int x, int y)
@@ -440,932 +186,11 @@ static int luma_of(uint32_t color)
 	return (int)((color >> 16 & 255) * 3 + (color >> 8 & 255) * 6 + (color & 255)) / 10;
 }
 
-/* Positive when the pixel is sky-blue, negative when it is warm rock, grass, or skin. */
-static int bias_of(uint32_t color)
-{
-	int r = (int)(color >> 16 & 255);
-	int g = (int)(color >> 8 & 255);
-	int b = (int)(color & 255);
-	return b - (r > g ? r : g);
-}
-
-static bool stipple_at(int x, int y)
-{
-	int height = (int)src_height;
-	if (y > 0 && y + 1 < height && grid[y - 1][x] == grid[y + 1][x] && grid[y - 1][x] != grid[y][x])
-		return true;
-	if (x > 0 && x + 1 < WIDTH && grid[y][x - 1] == grid[y][x + 1] && grid[y][x - 1] != grid[y][x])
-		return true;
-	return false;
-}
-
-/* Warm rock, grass, or skin. A bright cloud highlight stays above the luma cap,
- * so it is not treated as a body. */
-static bool warm_body(uint32_t color)
-{
-	return bias_of(color) < -20 && luma_of(color) < 160;
-}
-
-static int warm_inward(int x, int y, int sign)
-{
-	int n = 0;
-	for (int i = 0; i < 8; i++) {
-		int xx = x - sign * i;
-		if (xx < 0 || xx >= WIDTH || !warm_body(grid[y][xx]))
-			break;
-		n++;
-	}
-	return n;
-}
-
-/* `grow_down` fills the new column from the top. A shrinking edge fills from the bottom.
- * Over `len` console rows the cut moves one screen pixel at a time. */
-static void cut_run(unsigned out_w, int x, int y, int len, int sign, bool grow_down)
-{
-	if (len < 1)
-		return;
-	for (int i = 0; i < len; i++) {
-		int yy = y + i;
-		if (yy < 0 || yy >= (int)src_height || x + sign < 0 || x + sign >= WIDTH)
-			break;
-		uint32_t color = stair_color[yy][x + sign];
-		for (int sy = 0; sy < SCALE; sy++) {
-			int along = i * SCALE + sy;
-			int moved = along / len;
-			if (moved > SCALE)
-				moved = SCALE;
-			int cut = grow_down ? SCALE - moved : moved;
-			if (cut < 0)
-				cut = 0;
-			else if (cut > SCALE)
-				cut = SCALE;
-			uint32_t *row = &image[((size_t)yy * SCALE + (unsigned)sy) * out_w + (unsigned)x * SCALE];
-			for (int k = 0; k < cut; k++) {
-				int sx = sign > 0 ? SCALE - 1 - k : k;
-				row[sx] = color;
-			}
-		}
-	}
-}
-
-/* A step of two or three console pixels. The new cells stay put; the outside
- * color already beside the tip fills them so the edge moves a few screen pixels
- * per row instead of a ledge. A jump wider than that stays the block the game drew. */
-static void cut_span(unsigned out_w, int x, int y, int n, int sign, bool grow_down)
-{
-	if (n < 1 || y < 0 || y >= (int)src_height)
-		return;
-	int tip = x + n * sign;
-	if (tip < 0 || tip >= WIDTH)
-		return;
-	uint32_t color = stair_color[y][tip];
-	int width = n * SCALE;
-	for (int sy = 0; sy < SCALE; sy++) {
-		int keep = grow_down ? sy * n : width - sy * n;
-		if (keep < 0)
-			keep = 0;
-		else if (keep > width)
-			keep = width;
-		uint32_t *row = &image[((size_t)y * SCALE + (unsigned)sy) * out_w];
-		for (int k = 0; k < n; k++) {
-			int cx = x + k * sign;
-			if (cx < 0 || cx >= WIDTH)
-				continue;
-			for (int sx = 0; sx < SCALE; sx++) {
-				int from_in = sign > 0 ? k * SCALE + sx : k * SCALE + (SCALE - 1 - sx);
-				if (from_in >= keep)
-					row[cx * SCALE + sx] = color;
-			}
-		}
-	}
-}
-
-/* A small cream shape sitting on the ground, such as a figure drawn into the
- * background. Cloud highlights are larger, or they sit against the sky, so the
- * cloud stays the original drawing. A square corner is not a step, so a tower
- * or a letter keeps the corner the game drew. */
-static bool cream(uint32_t color)
-{
-	return bias_of(color) < -35 && luma_of(color) > 200;
-}
-
-static bool ink_pixel(uint32_t color)
-{
-	return luma_of(color) < 40;
-}
-
-static void cream_shapes(unsigned out_w)
-{
-	enum { MAX_COMP = 48, MAX_CELL = 48 };
-	int height = (int)src_height;
-	static uint8_t seen[MAX_HEIGHT][WIDTH];
-	static uint8_t keep[MAX_HEIGHT][WIDTH];
-	memset(seen, 0, sizeof seen);
-	memset(keep, 0, sizeof keep);
-
-	int cx[MAX_COMP][MAX_CELL], cy[MAX_COMP][MAX_CELL];
-	int count[MAX_COMP], ink[MAX_COMP], sky_n[MAX_COMP], ground_n[MAX_COMP];
-	int minx[MAX_COMP], maxx[MAX_COMP], miny[MAX_COMP], maxy[MAX_COMP];
-	int ncomp = 0;
-
-	for (int y = 0; y < height && ncomp < MAX_COMP; y++) {
-		for (int x = 0; x < WIDTH && ncomp < MAX_COMP; x++) {
-			if (seen[y][x] || !cream(grid[y][x]))
-				continue;
-			int sx[256], sy[256];
-			int sp = 1;
-			sx[0] = x;
-			sy[0] = y;
-			seen[y][x] = 1;
-			int id = ncomp++;
-			count[id] = ink[id] = sky_n[id] = ground_n[id] = 0;
-			minx[id] = maxx[id] = x;
-			miny[id] = maxy[id] = y;
-			bool overflow = false;
-			while (sp > 0) {
-				sp--;
-				int px = sx[sp], py = sy[sp];
-				if (count[id] < MAX_CELL) {
-					cx[id][count[id]] = px;
-					cy[id][count[id]] = py;
-				}
-				count[id]++;
-				if (px < minx[id])
-					minx[id] = px;
-				if (px > maxx[id])
-					maxx[id] = px;
-				if (py < miny[id])
-					miny[id] = py;
-				if (py > maxy[id])
-					maxy[id] = py;
-				static const int step[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-				for (int k = 0; k < 4; k++) {
-					int nx = px + step[k][0], ny = py + step[k][1];
-					if (nx < 0 || ny < 0 || nx >= WIDTH || ny >= height)
-						continue;
-					if (cream(grid[ny][nx])) {
-						if (seen[ny][nx])
-							continue;
-						seen[ny][nx] = 1;
-						if (sp >= 256) {
-							overflow = true;
-							continue;
-						}
-						sx[sp] = nx;
-						sy[sp] = ny;
-						sp++;
-					} else {
-						uint32_t other = grid[ny][nx];
-						int b = bias_of(other);
-						if (luma_of(other) < 40)
-							ink[id]++;
-						if (b > 12)
-							sky_n[id]++;
-						else if (b < -20 && luma_of(other) < 140)
-							ground_n[id]++;
-					}
-				}
-			}
-			if (overflow)
-				count[id] = MAX_CELL + 1;
-		}
-	}
-
-	for (int id = 0; id < ncomp; id++) {
-		if (count[id] > 16 || count[id] < 1)
-			continue;
-		if (maxx[id] - minx[id] < 1 || maxy[id] - miny[id] < 1)
-			continue;
-		if (ground_n[id] < 4 || ground_n[id] <= sky_n[id])
-			continue;
-		bool outlined = ink[id] >= 2;
-		if (!outlined) {
-			for (int other = 0; other < ncomp && !outlined; other++) {
-				if (ink[other] < 2)
-					continue;
-				int stored = count[other] < MAX_CELL ? count[other] : MAX_CELL;
-				for (int a = 0; a < count[id] && !outlined; a++) {
-					for (int b = 0; b < stored; b++) {
-						int dx = cx[id][a] - cx[other][b];
-						int dy = cy[id][a] - cy[other][b];
-						if (dx < 0)
-							dx = -dx;
-						if (dy < 0)
-							dy = -dy;
-						if ((dx > dy ? dx : dy) <= 2) {
-							outlined = true;
-							break;
-						}
-					}
-				}
-			}
-		}
-		if (!outlined)
-			continue;
-		for (int i = 0; i < count[id]; i++)
-			keep[cy[id][i]][cx[id][i]] = 1;
-	}
-
-	for (int y = 1; y < height - 2; y++) {
-		for (int x = 1; x < WIDTH - 1; x++) {
-			if (!keep[y][x] || stipple_at(x, y) || cream(grid[y - 1][x]))
-				continue;
-			for (int sign = 1; sign >= -1; sign -= 2) {
-				int xo = x + sign;
-				int xi = x - sign;
-				if (xo < 0 || xo >= WIDTH || xi < 0 || xi >= WIDTH || cream(grid[y][xo]))
-					continue;
-				/* The column already steps. A flat corner of a rectangle does not. */
-				bool growing = cream(grid[y + 1][x]) && cream(grid[y + 1][xo]) && cream(grid[y + 2][xo]);
-				bool ending = !cream(grid[y + 1][x]) && cream(grid[y][xi]) && cream(grid[y - 1][xi]);
-				if (growing || ending)
-					cut_run(out_w, x, y, 1, sign, true);
-			}
-		}
-	}
-
-	/* The dark of that same small shape, such as the pants beside the shirt.
-	 * It has to sit next to the cream we already kept, so a window or a letter
-	 * is not a figure. Only a column that already steps is cut. */
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH; x++) {
-			if (seen[y][x] || !ink_pixel(grid[y][x]))
-				continue;
-			int sx[64], sy[64], cx[16], cy[16];
-			int sp = 1, n = 0;
-			sx[0] = x;
-			sy[0] = y;
-			seen[y][x] = 1;
-			int minx = x, maxx = x, miny = y, maxy = y;
-			bool overflow = false;
-			while (sp > 0) {
-				sp--;
-				int px = sx[sp], py = sy[sp];
-				if (n < 16) {
-					cx[n] = px;
-					cy[n] = py;
-				}
-				n++;
-				if (px < minx)
-					minx = px;
-				if (px > maxx)
-					maxx = px;
-				if (py < miny)
-					miny = py;
-				if (py > maxy)
-					maxy = py;
-				static const int step[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-				for (int k = 0; k < 4; k++) {
-					int nx = px + step[k][0], ny = py + step[k][1];
-					if (nx < 0 || ny < 0 || nx >= WIDTH || ny >= height || seen[ny][nx])
-						continue;
-					if (!ink_pixel(grid[ny][nx]))
-						continue;
-					seen[ny][nx] = 1;
-					if (sp >= 64) {
-						overflow = true;
-						continue;
-					}
-					sx[sp] = nx;
-					sy[sp] = ny;
-					sp++;
-				}
-			}
-			if (overflow || n < 2 || n > 16 || maxx - minx < 1 || maxy - miny < 1)
-				continue;
-			bool near = false;
-			for (int i = 0; i < n && !near; i++) {
-				for (int dy = -2; dy <= 2 && !near; dy++) {
-					for (int dx = -2; dx <= 2; dx++) {
-						int ny = cy[i] + dy, nx = cx[i] + dx;
-						if (ny >= 0 && nx >= 0 && ny < height && nx < WIDTH && keep[ny][nx]) {
-							near = true;
-							break;
-						}
-					}
-				}
-			}
-			if (!near)
-				continue;
-			for (int i = 0; i < n; i++) {
-				int px = cx[i], py = cy[i];
-				if (py < 1 || py + 1 >= height || px < 2 || px >= WIDTH - 2 || stipple_at(px, py))
-					continue;
-				for (int sign = 1; sign >= -1; sign -= 2) {
-					int xo = px + sign, xi = px - sign;
-					if (ink_pixel(grid[py][xo]) || cream(grid[py][xo]) || bias_of(grid[py][xo]) > 12)
-						continue;
-					bool shrinking = !ink_pixel(grid[py + 1][px]) && ink_pixel(grid[py][xi])
-						&& ink_pixel(grid[py + 1][xi]) && !ink_pixel(grid[py + 1][xo]);
-					bool growing = !ink_pixel(grid[py - 1][px]) && ink_pixel(grid[py + 1][px])
-						&& ink_pixel(grid[py + 1][xo]) && ink_pixel(grid[py][xi]);
-					if (shrinking)
-						cut_run(out_w, px, py, 1, sign, false);
-					else if (growing)
-						cut_run(out_w, px, py, 1, sign, true);
-				}
-			}
-		}
-	}
-}
-
-/* Two pixels of background, and a one-pixel spur does not count as a wall.
- * A two-pixel crack between parts of the ship stays a square corner. */
-static bool open_outside(int x, int y, int sign)
-{
-	int xo = x + sign;
-	int xoo = x + 2 * sign;
-	int far = x + 3 * sign;
-	if (sprite_pixel(xo, y) || sprite_pixel(xoo, y))
-		return false;
-	if (!sprite_pixel(far, y))
-		return true;
-	return !sprite_pixel(far + sign, y);
-}
-
-/* Where the silhouette ends on row y, in pixels outward from x (sign is outward), or
- * NO_EDGE when the figure does not reach that row near x. */
-#define NO_EDGE 99
-static int edge_at(int x, int y, int sign)
-{
-	int from = x - 4 * sign;
-	if (y < 0 || y >= (int)src_height || from < 0 || from >= WIDTH || !sprite_pixel(from, y))
-		return NO_EDGE;
-	int at = -4;
-	while (at < 4 && sprite_pixel(x + (at + 1) * sign, y))
-		at++;
-	return at;
-}
-
-/* A stair belongs on a slope the artist drew: the outline keeps moving one way over the rows
- * around it. A photographed or digitized figure has an outline that wobbles in and out a pixel
- * at a time; a stair there is a thorn. */
-static bool steady_outline(int x, int y, int sign)
-{
-	int last = NO_EDGE, in = 0, out = 0;
-	for (int k = -2; k <= 2; k++) {
-		int e = edge_at(x, y + k, sign);
-		if (e == NO_EDGE)
-			continue;
-		if (last != NO_EDGE) {
-			in += e < last;
-			out += e > last;
-		}
-		last = e;
-	}
-	return !(in && out);
-}
-
-/* The silhouette runs straight down (dir 1) or up (dir -1) from x for two more rows. A stair
- * there is a notch at the top of a wall, and every such wall on a steep slope makes a saw. */
-static bool wall_from(int x, int y, int dir, int sign)
-{
-	return edge_at(x, y + dir, sign) == 0 && edge_at(x, y + 2 * dir, sign) == 0;
-}
-
 typedef struct {
 	unsigned out_w, out_h;
 	int height;
 } Canvas;
 
-/* A cut writes only into its own console row and takes its colors from before any cut, so the
- * rows step at once. */
-static void stair_rows(void *context, int y0, int y1)
-{
-	unsigned out_w = ((const Canvas *)context)->out_w;
-	int height = (int)src_height;
-	for (int y = y0 < 1 ? 1 : y0; y < y1 && y < height - 1; y++) {
-		for (int x = 2; x < WIDTH - 2; x++) {
-			if (glyph[y][x])
-				continue;
-			/* A checker dot matches on both axes and stays drawn. A warm edge against
-			 * a flat field matches on one axis only; that is a step, not stipple. */
-			bool checker = false;
-			if (stipple_at(x, y)) {
-				bool vert = y > 0 && y + 1 < height && grid[y - 1][x] == grid[y + 1][x]
-					&& grid[y - 1][x] != grid[y][x];
-				bool horiz = grid[y][x - 1] == grid[y][x + 1] && grid[y][x - 1] != grid[y][x];
-				checker = vert && horiz;
-				/* A checker stays drawn. A one-axis match on a character is the
-				 * silhouette between two sky pixels, not a cloud dot. */
-				bool character = sprite_pixel(x, y) && sprite_body[y][x] >= 14;
-				if (checker || (!warm_body(grid[y][x]) && !character))
-					continue;
-			}
-			bool sprite = sprite_pixel(x, y);
-			if (sprite) {
-				int span_h = (int)sprite_left[y][x] + sprite_right[y][x] + 1;
-				/* The whole shape is the test. A copyright letter is about eight
-				 * pixels tall. A hair column of a character is short, but the
-				 * character is not, so that column may still step. */
-				if (sprite_body[y][x] < 14 || span_h < 2)
-					continue;
-			}
-			for (int sign = 1; sign >= -1; sign -= 2) {
-				int xo = x + sign;
-				int xi = x - sign;
-				int xoo = x + 2 * sign;
-				int xii = xi - sign;
-				uint32_t here = grid[y][x];
-				uint32_t out = grid[y][xo];
-				int gap = luma_of(here) - luma_of(out);
-				if (gap < 0)
-					gap = -gap;
-				/* The outer silhouette of a warm shape. Two pixels outside are not
-				 * body, so a one-pixel hole stays put. A two-pixel tip stairs only
-				 * when the row above already reached the inward pixel: that is a
-				 * one-pixel step, not the flat top of a thin rock. */
-				int depth = warm_inward(x, y, sign);
-				bool warm_edge = !sprite && warm_body(here) && warm_body(grid[y][xi])
-					&& !warm_body(out) && !warm_body(grid[y][xoo]) && !sprite_pixel(xo, y) && !sprite_pixel(xoo, y);
-				bool thick = depth >= 3;
-				bool tip = depth == 2 && warm_body(grid[y - 1][xi]);
-				if (warm_edge && (thick || tip) && !warm_body(grid[y - 1][x])) {
-					/* A step of two or three shares one stair. The outer cell still
-					 * steps when the body behind it does not. */
-					int n = 0;
-					int inner = x;
-					while (n < 3) {
-						int xx = x - n * sign;
-						if (xx < 0 || xx >= WIDTH || !warm_body(grid[y][xx])
-							|| warm_body(grid[y - 1][xx]))
-							break;
-						inner = xx;
-						n++;
-					}
-					int behind = inner - sign;
-					if (n >= 2 && n <= 3 && behind >= 0 && behind < WIDTH
-						&& warm_body(grid[y][behind]) && warm_body(grid[y - 1][behind]))
-						cut_span(out_w, inner, y, n, sign, true);
-					else
-						cut_run(out_w, x, y, 1, sign, true);
-					continue;
-				}
-				/* The next row steps inward. A step of one pixel ramps this cell.
-				 * A step of two or three shares that ramp. The side above stays straight. */
-				if (warm_edge && depth >= 2 && warm_body(grid[y - 1][x])
-					&& !warm_body(grid[y + 1][x])) {
-					int n = 0;
-					int inner = x;
-					while (n < 3) {
-						int xx = x - n * sign;
-						if (xx < 0 || xx >= WIDTH || !warm_body(grid[y][xx])
-							|| warm_body(grid[y + 1][xx]))
-							break;
-						inner = xx;
-						n++;
-					}
-					int behind = inner - sign;
-					if (n >= 1 && n <= 3 && behind >= 0 && behind < WIDTH
-						&& warm_body(grid[y][behind]) && warm_body(grid[y + 1][behind]))
-						cut_span(out_w, inner, y, n, sign, false);
-					continue;
-				}
-				/* The sprite silhouette is already an edge. A brown hull against a gray
-				 * wall can sit under the luma gap and still be a different color.
-				 * Background steps still need a real gap, so texture is left alone. */
-				if (sprite) {
-					if (here == out)
-						continue;
-				} else if (gap < 40 || sprite_pixel(xo, y) || sprite_pixel(xoo, y)) {
-					continue; /* a figure in front is not the field the scenery steps against */
-				}
-
-				bool band = sprite && sprite_pixel(xo, y) && sprite_pixel(xi, y)
-					&& xi >= 0 && xi < WIDTH && grid[y][xi] == here
-					&& out != here && xoo >= 0 && xoo < WIDTH && grid[y][xoo] == out
-					&& gap >= 24;
-				bool thick3 = band && xii >= 0 && xii < WIDTH && grid[y][xii] == here;
-				if (thick3) {
-					/* A thick band inside the ship, not a one-pixel stroke. The corner
-					 * copies the flat color already beside it. */
-					if (grid[y - 1][x] != here) {
-						int n = 0;
-						int inner = x;
-						while (n < 3) {
-							int xx = x - n * sign;
-							if (xx < 0 || xx >= WIDTH || grid[y][xx] != here
-								|| grid[y - 1][xx] == here)
-								break;
-							inner = xx;
-							n++;
-						}
-						int behind = inner - sign;
-						if (n >= 1 && n <= 3 && behind >= 0 && behind < WIDTH
-							&& grid[y][behind] == here && grid[y - 1][behind] == here) {
-							cut_span(out_w, inner, y, n, sign, true);
-							continue;
-						}
-						/* A long band has no same color above it. Only the outer cell
-						 * steps; the rest of the band stays the block the game drew. */
-						if (n == 3) {
-							int fourth = x - 3 * sign;
-							if (fourth >= 0 && fourth < WIDTH
-								&& grid[y][fourth] == here && grid[y - 1][fourth] != here) {
-								cut_span(out_w, x, y, 1, sign, true);
-								continue;
-							}
-						}
-					} else if (grid[y + 1][x] != here) {
-						int n = 0;
-						int inner = x;
-						while (n < 3) {
-							int xx = x - n * sign;
-							if (xx < 0 || xx >= WIDTH || grid[y][xx] != here
-								|| grid[y + 1][xx] == here)
-								break;
-							inner = xx;
-							n++;
-						}
-						int behind = inner - sign;
-						if (n >= 1 && n <= 3 && behind >= 0 && behind < WIDTH
-							&& grid[y][behind] == here && grid[y + 1][behind] == here) {
-							cut_span(out_w, inner, y, n, sign, false);
-							continue;
-						}
-						if (n == 3) {
-							int fourth = x - 3 * sign;
-							if (fourth >= 0 && fourth < WIDTH
-								&& grid[y][fourth] == here && grid[y + 1][fourth] != here) {
-								cut_span(out_w, x, y, 1, sign, false);
-								continue;
-							}
-						}
-					}
-				} else if (band) {
-					/* Two pixels of the same color. Only a one-pixel step, and only
-					 * when the pixel inward already had that color. A one-pixel
-					 * stroke never reaches here. */
-					if (grid[y - 1][x] != here && grid[y - 1][xi] == here)
-						cut_run(out_w, x, y, 1, sign, true);
-					else if (grid[y - 1][x] == here && grid[y + 1][x] != here
-						&& grid[y + 1][xi] == here)
-						cut_run(out_w, x, y, 1, sign, false);
-				}
-				if (sprite) {
-					/* Only the outer pixel of the silhouette. A step of one pixel is
-					 * the old stair. A step of two or three shares one stair across
-					 * those cells, so the airship curve is not a ledge. A wider jump
-					 * keeps the cells the game drew, and only its outer corner steps,
-					 * when the next row keeps moving and the outside is open. */
-					if (sprite_pixel(xo, y) || !sprite_pixel(xi, y) || !steady_outline(x, y, sign))
-						continue;
-					bool stepped = false;
-					if (!sprite_pixel(x, y - 1) && !wall_from(x, y, 1, sign)) {
-						int n = 0;
-						int inner = x;
-						while (n < 3) {
-							int xx = x - n * sign;
-							if (xx < 0 || xx >= WIDTH || !sprite_pixel(xx, y) || sprite_pixel(xx, y - 1))
-								break;
-							inner = xx;
-							n++;
-						}
-						int behind = inner - sign;
-						if (n >= 1 && n <= 3 && behind >= 0 && behind < WIDTH
-							&& sprite_pixel(behind, y) && sprite_pixel(behind, y - 1)
-							&& (n > 1 || sprite_pixel(behind - sign, y))
-							&& !sprite_pixel(xo, y)) {
-							cut_span(out_w, inner, y, n, sign, true);
-							stepped = true;
-						} else if (n == 3) {
-							int fourth = x - 3 * sign;
-							bool longer = fourth >= 0 && fourth < WIDTH
-								&& sprite_pixel(fourth, y) && !sprite_pixel(fourth, y - 1);
-							if (longer && sprite_pixel(x, y + 1) && open_outside(x, y, sign)) {
-								cut_span(out_w, x, y, 1, sign, true);
-								stepped = true;
-							}
-						}
-					}
-					if (!stepped && !sprite_pixel(x, y + 1) && !wall_from(x, y, -1, sign)) {
-						int n = 0;
-						int inner = x;
-						while (n < 3) {
-							int xx = x - n * sign;
-							if (xx < 0 || xx >= WIDTH || !sprite_pixel(xx, y) || sprite_pixel(xx, y + 1))
-								break;
-							inner = xx;
-							n++;
-						}
-						int behind = inner - sign;
-						if (n >= 1 && n <= 3 && behind >= 0 && behind < WIDTH
-							&& sprite_pixel(behind, y + 1)
-							&& (n > 1 || sprite_pixel(behind - sign, y))
-							&& !sprite_pixel(xo, y))
-							cut_span(out_w, inner, y, n, sign, false);
-						else if (n == 3) {
-							int fourth = x - 3 * sign;
-							bool longer = fourth >= 0 && fourth < WIDTH
-								&& sprite_pixel(fourth, y) && !sprite_pixel(fourth, y + 1);
-							if (longer && sprite_pixel(x, y - 1) && open_outside(x, y, sign))
-								cut_span(out_w, x, y, 1, sign, false);
-						}
-					}
-					continue;
-				} else {
-					/* A thick edge against a flat black, a flat bright field, or the
-					 * other way around: a bright shape against a darker field.
-					 * Same color three pixels in, and the row above already
-					 * stepped, so a square window stays square. Sky against sky
-					 * stays, and so does the cloud band. */
-					int field = luma_of(out);
-					int body = luma_of(here);
-					bool blue_pair = bias_of(here) > 20 && bias_of(out) > 20;
-					if (y >= 45 && !blue_pair && gap >= 40
-						&& xii >= 0 && xii < WIDTH
-						&& grid[y][xi] == here && grid[y][xii] == here
-						&& xoo >= 0 && xoo < WIDTH && grid[y][xoo] == out
-						&& grid[y - 1][x] != here
-						&& grid[y - 1][xo] == out
-						&& !sprite_pixel(x, y - 1)
-						&& (field < 12 || (field >= 150 && body <= 90)
-							|| (body >= 150 && field <= 90 && field >= 12))) {
-						int n = 0;
-						int inner = x;
-						while (n < 3) {
-							int xx = x - n * sign;
-							if (xx < 0 || xx >= WIDTH || grid[y][xx] != here
-								|| grid[y - 1][xx] == here)
-								break;
-							inner = xx;
-							n++;
-						}
-						int behind = inner - sign;
-						bool bright_on_dark = body >= 150 && field <= 90 && field >= 12;
-						if (n >= 2 && n <= 3 && body > 16 && !bright_on_dark
-							&& behind >= 0 && behind < WIDTH
-							&& grid[y][behind] == here && grid[y - 1][behind] == here)
-							cut_span(out_w, inner, y, n, sign, true);
-						else if (n == 1 && grid[y - 1][xi] == here)
-							cut_run(out_w, x, y, 1, sign, true);
-						else
-							goto field_done;
-						continue;
-					}
-					if (y >= 45 && !blue_pair && gap >= 40
-						&& xi >= 0 && xi < WIDTH && grid[y][xi] == here
-						&& (xii < 0 || xii >= WIDTH || grid[y][xii] != here)
-						&& xoo >= 0 && xoo < WIDTH && grid[y][xoo] == out
-						&& grid[y - 1][x] != here
-						&& grid[y - 1][xo] == out
-						&& grid[y - 1][xi] == here
-						&& !sprite_pixel(x, y - 1)
-						&& (field < 12 || (field >= 150 && body <= 90)
-							|| (body >= 150 && field <= 90 && field >= 12))) {
-						/* Two pixels of the same color. Only this outer cell steps. */
-						cut_run(out_w, x, y, 1, sign, true);
-						continue;
-					}
-					field_done:;
-					/* The color beside the step has to be a flat region, not a one-pixel band. */
-					int side = luma_of(out) - luma_of(grid[y][xoo]);
-					if (side < 0)
-						side = -side;
-					if (side > 22)
-						continue;
-					int above = luma_of(grid[y - 1][x]) - luma_of(out);
-					if (above < 0)
-						above = -above;
-					if (above > 32)
-						continue;
-					int above_here = luma_of(grid[y - 1][x]) - luma_of(here);
-					if (above_here < 0)
-						above_here = -above_here;
-					if (above_here < 24)
-						continue; /* the column already existed: a vertical edge */
-					int in_l = luma_of(grid[y][xi]) - luma_of(out);
-					if (in_l < 0)
-						in_l = -in_l;
-					if (in_l < 30)
-						continue;
-					int in_l2 = luma_of(grid[y][xii]) - luma_of(out);
-					if (in_l2 < 0)
-						in_l2 = -in_l2;
-					if (in_l2 < 30)
-						continue;
-					/* Above and inward has to be the shape. A flat top corner stays square. */
-					int back = luma_of(grid[y - 1][xi]) - luma_of(out);
-					if (back < 0)
-						back = -back;
-					if (back < 30)
-						continue;
-					/* Land against a flat sky, or against a flat black field such as a cave.
-					 * A cloud highlight is not warm, so the cloud stays drawn. */
-					if (bias_of(out) <= 12 && luma_of(out) >= 28)
-						continue;
-					int warm = 99;
-					for (int i = 0; i < 5; i++) {
-						int xx = x - sign * i;
-						if (xx < 0 || xx >= WIDTH)
-							break;
-						int b = bias_of(grid[y][xx]);
-						if (b < warm)
-							warm = b;
-					}
-					if (warm > -15)
-						continue;
-				}
-
-				cut_run(out_w, x, y, 1, sign, true);
-			}
-		}
-	}
-}
-
-static void stairs(unsigned out_w)
-{
-	int height = (int)src_height;
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < WIDTH; x++)
-			stair_color[y][x] = image[(size_t)y * SCALE * out_w + (size_t)x * SCALE];
-	}
-	Canvas canvas = { out_w, (unsigned)height * SCALE, height };
-	remaster_bands(height, stair_rows, &canvas);
-	cream_shapes(out_w);
-}
-
-static void paint_color(unsigned out_w, unsigned out_h, int x, int y, uint32_t color, int from, int to)
-{
-	for (int j = from; j < to && j < SCALE; j++) {
-		unsigned py = (unsigned)y * SCALE + (unsigned)j;
-		if (py >= out_h)
-			continue;
-		uint32_t *dst = &image[(size_t)py * out_w + (unsigned)x * SCALE];
-		for (int i = 0; i < SCALE; i++)
-			dst[i] = color;
-	}
-}
-
-#define MAX_SHAPE_RUN 96
-
-/* Two neighbors in a smooth blend: the same tone a small step apart. Pixel art shades in
- * bigger steps; a painted or digitized picture blends in small ones. */
-static bool blend_step(uint32_t a, uint32_t b)
-{
-	if (a == b)
-		return false;
-	int dr = (int)(a >> 16 & 255) - (int)(b >> 16 & 255);
-	int dg = (int)(a >> 8 & 255) - (int)(b >> 8 & 255);
-	int db = (int)(a & 255) - (int)(b & 255);
-	int dl = luma_of(a) - luma_of(b);
-	return abs(dr) <= 40 && abs(dg) <= 40 && abs(db) <= 40 && abs(dl) <= 28;
-}
-
-/* Hue in degrees, or -1 for a gray. */
-static int hue_of(uint32_t c)
-{
-	int r = (int)(c >> 16 & 255), g = (int)(c >> 8 & 255), b = (int)(c & 255);
-	int hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
-	int lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
-	int span = hi - lo;
-	if (span < 24)
-		return -1;
-	int h = hi == r ? 60 * (g - b) / span : hi == g ? 120 + 60 * (b - r) / span : 240 + 60 * (r - g) / span;
-	return h < 0 ? h + 360 : h;
-}
-
-static bool same_hue(uint32_t a, uint32_t b)
-{
-	int ha = hue_of(a), hb = hue_of(b);
-	if (ha < 0 || hb < 0)
-		return ha == hb;
-	int d = abs(ha - hb);
-	return (d > 180 ? 360 - d : d) <= 24;
-}
-
-/* A step of a painted ramp: one hue getting lighter (or darker) through the color above, this
- * one and the one below, as a sky or a lava glow is painted in bands. */
-static bool ramp_step(uint32_t above, uint32_t here, uint32_t below)
-{
-	int a = luma_of(above), h = luma_of(here), b = luma_of(below);
-	return ((a < h && h < b) || (a > h && h > b)) && same_hue(above, here) && same_hue(here, below);
-}
-
-/* A run of one color down a column that the game drew as a flat shape: not stipple, not a
- * stroke, not a warm body, not a painted blend, not cut by the screen or by a figure in front. */
-static bool flat_shape(int x, int y, int height)
-{
-	uint32_t here = grid[y][x];
-	if (glyph[y][x] || sprite_pixel(x, y))
-		return false;
-	if (y > 0 && y + 1 < height && grid[y - 1][x] == grid[y + 1][x] && grid[y - 1][x] != here)
-		return false; /* stipple, such as a cloud */
-	if (wide_run[y][x] < 3)
-		return false; /* a one-pixel stroke, such as a letter */
-	if (luma_of(here) >= 230)
-		return false; /* white is a glow or a flash; a step on it reads as a gray mark */
-	/* A tall warm body (a cliff, a field, a lava fall) is many colors over many rows,
-	 * and steps lit by hue land on a painted blend as stripes. It keeps its colors. */
-	if (warm_body(here) && (int)warm_above[y][x] + warm_below[y][x] + 1 >= 14)
-		return false;
-	int len = tall_run[y][x];
-	int pos = run_at[y][x];
-	if (len < 3)
-		return false;
-	/* A band of a painted or digitized blend (its neighbor above or below is the next shade
-	 * of it) is already lit, and the backdrop or a run as tall as a sky is not a shape. */
-	if (len > MAX_SHAPE_RUN || key_at(src_motion, y + src_motion->top, x) == 6
-		|| y - pos == 0 || y - pos + len >= height)
-		return false;
-	if (field[y][x])
-		return false;
-	if (blend_step(here, grid[y - pos - 1][x]) || blend_step(here, grid[y - pos + len][x])
-		|| ramp_step(grid[y - pos - 1][x], here, grid[y - pos + len][x]))
-		return false;
-	return !sprite_pixel(x, y - pos - 1) && !sprite_pixel(x, y - pos + len);
-}
-
-static void bevel_rows(void *context, int y0, int y1)
-{
-	const Canvas *canvas = context;
-	unsigned out_w = canvas->out_w, out_h = canvas->out_h;
-	int height = canvas->height;
-	for (int y = y0; y < y1; y++) {
-		/* The step of each flat pixel of this row: 0 none, 124 or 112 lit, 62 or 72 shaded. */
-		int step[WIDTH];
-		for (int x = 0; x < WIDTH; x++) {
-			uint32_t here = grid[y][x];
-			step[x] = 0;
-			if (glyph[y][x])
-				continue;
-			if (sprite_pixel(x, y)) {
-				/* The body, measured on the silhouette. Color runs of one pixel
-				 * are the hair and the cloth, not a reason to skip the character.
-				 * A mark one pixel wide, such as a letter, stays drawn. */
-				int above = sprite_above[y][x];
-				int below = sprite_below[y][x];
-				int span_v = above + below + 1;
-				int span_h = (int)sprite_left[y][x] + sprite_right[y][x] + 1;
-				if (span_v < 14 || span_h < 2)
-					continue; /* a letter stays the drawn color */
-				/* A third of the body, in two hard steps. The middle stays drawn. */
-				int band = span_v / 3;
-				if (band < 1)
-					band = 1;
-				if (band * 2 >= span_v)
-					band = (span_v - 1) / 2;
-				int half = band / 2;
-				/* The outline stays the drawn pixel. A light on that stair is what
-				 * reads as a serration; the step sits on the row inside it. */
-				if (above == 0 || below == 0 || sprite_left[y][x] == 0 || sprite_right[y][x] == 0)
-					continue;
-				/* Same hue. Mixing in a beige would turn a black pixel beige and scatter it over the picture. */
-				if (above < band && below >= band)
-					paint_color(out_w, out_h, x, y, shade(here, half > 0 && above >= half ? 112 : 124), 0, SCALE);
-				else if (below < band && above >= band)
-					paint_color(out_w, out_h, x, y, shade(here, half > 0 && below >= half ? 78 : 62), 0, SCALE);
-				continue;
-			}
-			if (!flat_shape(x, y, height))
-				continue;
-			/* A column that passes beside one of the same color that does not is a stripe,
-			 * not the lit side of a shape. */
-			if ((x > 0 && grid[y][x - 1] == here && !flat_shape(x - 1, y, height))
-				|| (x + 1 < WIDTH && grid[y][x + 1] == here && !flat_shape(x + 1, y, height)))
-				continue;
-			/* Light from above, on the inside of a tall shape. The first and last
-			 * pixel of the run are the outline, and they stay drawn. */
-			int len = tall_run[y][x];
-			int pos = run_at[y][x];
-			int band = len / 3;
-			if (pos == 0 || pos == len - 1)
-				continue;
-			/* The edge the step follows moves at most a pixel to the next column, so the step
-			 * is a contour and not a notch in a flat field. */
-			bool ragged = false;
-			for (int nx = x - 1; nx <= x + 1; nx += 2) {
-				if (nx < 0 || nx >= WIDTH || grid[y][nx] != here)
-					continue;
-				int top_d = run_at[y][nx] - pos;
-				int bottom_d = (tall_run[y][nx] - run_at[y][nx]) - (len - pos);
-				if ((pos < band && abs(top_d) > 1) || (pos >= band && abs(bottom_d) > 1))
-					ragged = true;
-			}
-			if (ragged)
-				continue;
-			/* Two flat steps on each side, same hue. The step nearer the outline
-			 * is the stronger one. A short band keeps the single step it had. */
-			int half = band / 2;
-			int from_bottom = len - 1 - pos;
-			if (pos < band)
-				step[x] = half > 0 && pos < half ? 124 : 112;
-			else if (from_bottom < band)
-				step[x] = half > 0 && from_bottom < half ? 62 : 72;
-		}
-		/* A step one column wide is a streak down a flat field, not the side of a shape. */
-		for (int x = 0; x < WIDTH; x++)
-			if (step[x] && ((x > 0 && step[x - 1] == step[x]) || (x + 1 < WIDTH && step[x + 1] == step[x])))
-				paint_color(out_w, out_h, x, y, shade(grid[y][x], step[x]), 0, SCALE);
-	}
-}
-
-static void bevel(unsigned out_w, unsigned out_h)
-{
-	prepare_grid();
-	Canvas canvas = { out_w, out_h, (int)src_height };
-	remaster_bands(canvas.height, bevel_rows, &canvas);
-}
 
 /* Dynamic light. The game already marks what glows: a flame drawn in the
  * scenery, or a spell the console adds on top of the picture with color math.
@@ -2342,18 +1167,197 @@ static void apply_rows(void *context, int y0, int y1)
 	}
 }
 
-static void fill_rows(void *context, int y0, int y1)
+/* MMPX (McGuire and Gagiu, 2021): each pixel becomes 2x2 using only colors already in the
+ * picture. Diagonals, 2:1 slopes and curves round off; flat color, single-pixel detail
+ * and text keep their shape. Run again to reach 4x and 8x. */
+static uint32_t mmpx_a[MAX_HEIGHT * WIDTH * (REMASTER_SCALE_MAX / 2) * (REMASTER_SCALE_MAX / 2)];
+static uint32_t mmpx_b[MAX_HEIGHT * WIDTH * (REMASTER_SCALE_MAX / 2) * (REMASTER_SCALE_MAX / 2)];
+
+typedef struct {
+	const uint32_t *src;
+	uint32_t *dst;
+	int w, h, factor;
+	size_t dst_stride;
+} MmpxPass;
+
+/* A checkerboard dither is a flat tone, not a field of diagonals. */
+static bool dither[MAX_HEIGHT][WIDTH];
+
+static void find_dither(int h)
 {
-	unsigned out_w = ((const Canvas *)context)->out_w;
-	for (int y = y0; y < y1; y++) {
+	for (int y = 0; y < h; y++)
 		for (int x = 0; x < WIDTH; x++) {
-			uint32_t color = at_xy(x, y);
-			uint32_t *dst = &image[((size_t)y * SCALE) * out_w + (size_t)x * SCALE];
-			for (int j = 0; j < SCALE; j++)
-				for (int i = 0; i < SCALE; i++)
-					dst[(size_t)j * out_w + (unsigned)i] = color;
+			uint32_t e = grid[y][x];
+			int diag = 0, side = 0;
+			for (int k = 0; k < 4; k++) {
+				int dx = k & 1 ? 1 : -1, dy = k & 2 ? 1 : -1;
+				int ox = (k == 0 ? -1 : k == 1 ? 1 : 0), oy = (k == 2 ? -1 : k == 3 ? 1 : 0);
+				int ax = x + dx, ay = y + dy, bx = x + ox, by = y + oy;
+				if (ax >= 0 && ay >= 0 && ax < WIDTH && ay < h && grid[ay][ax] == e)
+					diag++;
+				if (bx >= 0 && by >= 0 && bx < WIDTH && by < h && grid[by][bx] == e)
+					side++;
+			}
+			dither[y][x] = diag >= 3 && side == 0;
+		}
+}
+
+/* Past the first doubling, a shape's edge keeps rounding but a patch of many colors
+ * does not, or every speck in it grows into a star. */
+static bool two_colors(uint32_t e, const uint32_t *n, int count)
+{
+	uint32_t other = e;
+	for (int i = 0; i < count; i++) {
+		if (n[i] == e || n[i] == other)
+			continue;
+		if (other != e)
+			return false;
+		other = n[i];
+	}
+	return true;
+}
+
+static int mmpx_luma(uint32_t c)
+{
+	return (int)(c >> 16 & 255) + (int)(c >> 8 & 255) + (int)(c & 255);
+}
+
+static void mmpx_rows(void *context, int y0, int y1)
+{
+	const MmpxPass *p = context;
+	const uint32_t *s = p->src;
+	int w = p->w, h = p->h;
+#define PX(dx, dy) s[(size_t)(y + (dy) < 0 ? 0 : y + (dy) >= h ? h - 1 : y + (dy)) * (size_t)w \
+	+ (size_t)(x + (dx) < 0 ? 0 : x + (dx) >= w ? w - 1 : x + (dx))]
+#define EQ3(b, a0, a1, a2) ((b) == (a0) && (b) == (a1) && (b) == (a2))
+#define EQ4(b, a0, a1, a2, a3) ((b) == (a0) && (b) == (a1) && (b) == (a2) && (b) == (a3))
+#define ANY3(b, a0, a1, a2) ((b) == (a0) || (b) == (a1) || (b) == (a2))
+#define NONE2(b, a0, a1) ((b) != (a0) && (b) != (a1))
+#define NONE4(b, a0, a1, a2, a3) ((b) != (a0) && (b) != (a1) && (b) != (a2) && (b) != (a3))
+	for (int y = y0; y < y1; y++) {
+		uint32_t *out = p->dst + (size_t)(2 * y) * p->dst_stride;
+		for (int x = 0; x < w; x++) {
+			uint32_t A = PX(-1, -1), B = PX(0, -1), C = PX(1, -1);
+			uint32_t D = PX(-1, 0), E = PX(0, 0), F = PX(1, 0);
+			uint32_t G = PX(-1, 1), H = PX(0, 1), I = PX(1, 1);
+			uint32_t J = E, K = E, L = E, M = E;
+			uint32_t around[8] = { A, B, C, D, F, G, H, I };
+			bool keep = dither[y / p->factor][x / p->factor] || (p->factor > 1 && !two_colors(E, around, 8));
+			if (!keep && (A != E || B != E || C != E || D != E || F != E || G != E || H != E || I != E)) {
+				uint32_t P = PX(0, -2), S = PX(0, 2), Q = PX(-2, 0), R = PX(2, 0);
+				int Bl = mmpx_luma(B), Dl = mmpx_luma(D), El = mmpx_luma(E), Fl = mmpx_luma(F), Hl = mmpx_luma(H);
+
+				/* 1:1 slopes */
+				if (D == B && D != H && D != F && (El >= Dl || E == A) && ANY3(E, A, C, G) && (El < Dl || A != D || E != P || E != Q))
+					J = D;
+				if (B == F && B != D && B != H && (El >= Bl || E == C) && ANY3(E, A, C, I) && (El < Bl || C != B || E != P || E != R))
+					K = B;
+				if (H == D && H != F && H != B && (El >= Hl || E == G) && ANY3(E, A, G, I) && (El < Hl || G != H || E != S || E != Q))
+					L = H;
+				if (F == H && F != B && F != D && (El >= Fl || E == I) && ANY3(E, C, G, I) && (El < Fl || I != H || E != R || E != S))
+					M = F;
+
+				/* a line crossing a line */
+				if (E != F && EQ4(E, C, I, D, Q) && F == B && F == H && F != PX(3, 0))
+					K = M = F;
+				if (E != D && EQ4(E, A, G, F, R) && D == B && D == H && D != PX(-3, 0))
+					J = L = D;
+				if (E != H && EQ4(E, G, I, B, P) && H == D && H == F && H != PX(0, 3))
+					L = M = H;
+				if (E != B && EQ4(E, A, C, H, S) && B == D && B == F && B != PX(0, -3))
+					J = K = B;
+
+				/* the tip of a triangle */
+				if (Bl < El && EQ4(E, G, H, I, S) && NONE4(E, A, D, C, F))
+					J = K = B;
+				if (Hl < El && EQ4(E, A, B, C, P) && NONE4(E, D, G, I, F))
+					L = M = H;
+				if (Fl < El && EQ4(E, A, D, G, Q) && NONE4(E, B, C, I, H))
+					K = M = F;
+				if (Dl < El && EQ4(E, C, F, I, R) && NONE4(E, B, A, G, H))
+					J = L = D;
+
+				/* 2:1 slopes */
+				if (H != B) {
+					if (H != A && H != E && H != C) {
+						if (EQ3(H, G, F, R) && NONE2(H, D, PX(2, -1)))
+							L = M;
+						if (EQ3(H, I, D, Q) && NONE2(H, F, PX(-2, -1)))
+							M = L;
+					}
+					if (B != I && B != G && B != E) {
+						if (EQ3(B, A, F, R) && NONE2(B, D, PX(2, 1)))
+							J = K;
+						if (EQ3(B, C, D, Q) && NONE2(B, F, PX(-2, 1)))
+							K = J;
+					}
+				}
+				if (F != D) {
+					if (D != I && D != E && D != C) {
+						if (EQ3(D, A, H, S) && NONE2(D, B, PX(1, 2)))
+							J = L;
+						if (EQ3(D, G, B, P) && NONE2(D, H, PX(1, -2)))
+							L = J;
+					}
+					if (F != E && F != A && F != G) {
+						if (EQ3(F, C, H, S) && NONE2(F, B, PX(-1, 2)))
+							K = M;
+						if (EQ3(F, I, B, P) && NONE2(F, H, PX(-1, -2)))
+							M = K;
+					}
+				}
+			}
+			out[2 * x] = J;
+			out[2 * x + 1] = K;
+			out[p->dst_stride + 2 * x] = L;
+			out[p->dst_stride + 2 * x + 1] = M;
 		}
 	}
+#undef PX
+#undef EQ3
+#undef EQ4
+#undef ANY3
+#undef NONE2
+#undef NONE4
+}
+
+typedef struct {
+	const uint32_t *src;
+	int w, factor;
+	unsigned out_w;
+} Nearest;
+
+static void nearest_rows(void *context, int y0, int y1)
+{
+	const Nearest *n = context;
+	for (int y = y0; y < y1; y++) {
+		const uint32_t *row = n->src + (size_t)(y * n->factor / SCALE) * (size_t)n->w;
+		uint32_t *dst = &image[(size_t)y * n->out_w];
+		for (unsigned x = 0; x < n->out_w; x++)
+			dst[x] = row[x * (unsigned)n->factor / (unsigned)SCALE];
+	}
+}
+
+static void mmpx(unsigned out_w)
+{
+	int h = (int)src_height;
+	for (int y = 0; y < h; y++)
+		memcpy(&mmpx_a[(size_t)y * WIDTH], grid[y], WIDTH * sizeof(uint32_t));
+	find_dither(h);
+	const uint32_t *cur = mmpx_a;
+	int factor = 1;
+	while (factor * 2 <= SCALE) {
+		bool last = factor * 2 == SCALE;
+		uint32_t *dst = last ? image : cur == mmpx_a ? mmpx_b : mmpx_a;
+		MmpxPass p = { cur, dst, WIDTH * factor, h * factor, factor, last ? out_w : (size_t)WIDTH * factor * 2 };
+		remaster_bands(h * factor, mmpx_rows, &p);
+		factor *= 2;
+		cur = dst;
+	}
+	if (factor == SCALE && cur == image)
+		return;
+	Nearest n = { cur, WIDTH * factor, factor, out_w };
+	remaster_bands(h * SCALE, nearest_rows, &n);
 }
 
 static int scale_hint;
@@ -2384,11 +1388,8 @@ const uint32_t *remaster_frame(const void *pixels, size_t pitch, unsigned height
 	unsigned out_w = WIDTH * SCALE;
 	unsigned out_h = height * SCALE;
 
-	Canvas canvas = { out_w, out_h, (int)height };
-	remaster_bands((int)height, fill_rows, &canvas);
-
-	bevel(out_w, out_h);
-	stairs(out_w);
+	prepare_grid();
+	mmpx(out_w);
 
 	memset(shadowed, 0, (size_t)out_w * out_h);
 	for (unsigned y = 0; y + 1 < height; y++) {
