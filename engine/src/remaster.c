@@ -527,6 +527,14 @@ static unsigned light_hash(unsigned v)
 static void apply_rows(void *context, int y0, int y1);
 static void settle_rows(void *context, int y0, int y1);
 static void find_bloom(int h);
+typedef struct {
+	const Light *light;
+	int h;
+} Shaft;
+static void shaft_rows(void *context, int y0, int y1);
+/* lights side by side (a lava pool found as several) share one ceiling, not one each */
+#define SHAFT_MOST 48
+static int16_t shafted[MAX_HEIGHT][WIDTH][3];
 static void wide_pass(const CoreMotion *m, const Light *lights, int count, int h);
 
 static void emit_rows(void *context, int y0, int y1)
@@ -1045,6 +1053,12 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 	Canvas canvas = { out_w, (unsigned)h * SCALE, h };
 	remaster_bands(h, settle_rows, NULL);
 	find_bloom(h);
+	memset(shafted, 0, sizeof shafted);
+	for (int k = 0; k < count; k++)
+		if (wide_light(&lights[k]) && lights[k].x1 - lights[k].x0 >= 6 && lights[k].y1 - lights[k].y0 >= 6) {
+			Shaft s = { &lights[k], h };
+			remaster_bands(h, shaft_rows, &s);
+		}
 	remaster_bands(h, apply_rows, &canvas);
 }
 
@@ -1188,6 +1202,59 @@ static void settle_rows(void *context, int y0, int y1)
 			o[3] = (int16_t)ar, o[4] = (int16_t)ag, o[5] = (int16_t)ab;
 		}
 	}
+}
+
+/* Shafts: a bright window or a lava pool lights the air in front of it. From each pixel near
+ * it, the way back to its center is walked; every glowing pixel of it on that way adds to the
+ * pixel, so the light leaves in rays, and a figure standing in the glow cuts a dark ray. */
+#define SHAFT_REACH 72
+#define SHAFT_STEPS 16
+
+static void shaft_rows(void *context, int y0, int y1)
+{
+	const Shaft *s = context;
+	const Light *l = s->light;
+	float cx = (float)(l->x0 + l->x1) * 0.5f, cy = (float)(l->y0 + l->y1) * 0.5f;
+	int ax = l->x0 - SHAFT_REACH, bx = l->x1 + SHAFT_REACH, ay = l->y0 - SHAFT_REACH, by = l->y1 + SHAFT_REACH;
+	if (y0 < ay)
+		y0 = ay;
+	if (y1 > by + 1)
+		y1 = by + 1;
+	for (int y = y0; y < y1; y++)
+		for (int x = ax < 0 ? 0 : ax; x <= bx && x < WIDTH; x++) {
+			int ex = x < l->x0 ? l->x0 - x : x > l->x1 ? x - l->x1 : 0;
+			int ey = y < l->y0 ? l->y0 - y : y > l->y1 ? y - l->y1 : 0;
+			float far = __builtin_sqrtf((float)(ex * ex + ey * ey));
+			if (far <= 0.0f || far >= (float)SHAFT_REACH || sprite_pixel(x, y))
+				continue;
+			float dx = (cx - (float)x) / SHAFT_STEPS, dy = (cy - (float)y) / SHAFT_STEPS;
+			float px = (float)x, py = (float)y;
+			int sum[3] = { 0, 0, 0 }, hits = 0;
+			for (int i = 0; i < SHAFT_STEPS; i++, px += dx, py += dy) {
+				int qx = (int)px, qy = (int)py;
+				if (qx < l->x0 || qx > l->x1 || qy < l->y0 || qy > l->y1 || !emits[qy][qx])
+					continue;
+				uint32_t c = at_xy(qx, qy);
+				if (luma_of(c) < 120)
+					continue;
+				sum[0] += (int)(c >> 16 & 255), sum[1] += (int)(c >> 8 & 255), sum[2] += (int)(c & 255);
+				hits++;
+			}
+			if (!hits)
+				continue;
+			float fade = 1.0f - far / (float)SHAFT_REACH;
+			fade *= fade;
+			for (int c = 0; c < 3; c++) {
+				int add = (int)((float)sum[c] / SHAFT_STEPS * fade * 0.5f);
+				if (shafted[y][x][c] + add > SHAFT_MOST)
+					add = SHAFT_MOST - shafted[y][x][c];
+				if (add <= 0)
+					continue;
+				shafted[y][x][c] = (int16_t)(shafted[y][x][c] + add);
+				int v = bloom[y][x][c] + add;
+				bloom[y][x][c] = (int16_t)(v > 255 ? 255 : v);
+			}
+		}
 }
 
 static void find_bloom(int h)
