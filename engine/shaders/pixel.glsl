@@ -1,7 +1,6 @@
 /*
    Pixel perfect: every source pixel becomes a block of screen pixels, sampled with nearest
-   filtering. No blending of any kind. Past 4x the picture fills the screen, so a block can be
-   one screen pixel wider than its neighbor, too little to see.
+   filtering. No blending of any kind.
 */
 
 #if defined(VERTEX)

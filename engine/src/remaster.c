@@ -1636,7 +1636,7 @@ static void env_box(int x0, int y0, int x1, int y1, int h, int tint[3])
 	int c3[3] = { r, g, b };
 	for (int k = 0; k < 3; k++) {
 		int t = c3[k] * 256 / l;
-		tint[k] = t < 160 ? 160 : t > 360 ? 360 : t;
+		tint[k] = t < 200 ? 200 : t > 310 ? 310 : t;
 	}
 }
 
@@ -1765,16 +1765,21 @@ static void volume_rows(void *context, int y0, int y1)
 			key_direction(x, y, &lx, &ly);
 			lx *= 0.87f, ly *= 0.87f;
 			float facing = (nx * lx + ny * ly + nz * 0.49f) / len - 0.49f;
-			int k = (int)(facing * (facing > 0 ? 220.0f : 120.0f));
+			int k = (int)(facing * (facing > 0 ? 80.0f : 70.0f));
 			uint32_t c = grid[y][x];
 			int o[3] = { (int)(c >> 16 & 255), (int)(c >> 8 & 255), (int)(c & 255) };
 			int tint[3], sky[3];
 			env_tint(x, y, h, tint);
 			sky_tint(x, y, h, sky);
 			/* the whole figure a little in the room's color, the side turned away from the key light more */
-			int bounce = 64 + (k < 0 ? -k : 0);
+			int bounce = 32 + (k < 0 ? -k / 2 : 0);
 			float up = -ny / len;
-			int top = up > 0.0f ? (int)(up * 150.0f) : 0;
+			int top = up > 0.0f ? (int)(up * 60.0f) : 0;
+			/* the lit side lightens only as far as its brightest channel has room: skin stays
+			 * skin instead of washing out to white */
+			int most = o[0] > o[1] ? (o[0] > o[2] ? o[0] : o[2]) : (o[1] > o[2] ? o[1] : o[2]);
+			if (k > 0 && most > 0 && most * (256 + k) / 256 > 245)
+				k = most >= 245 ? 0 : 245 * 256 / most - 256;
 			for (int i = 0; i < 3; i++) {
 				o[i] = o[i] * (256 + k) / 256;
 				o[i] += (o[i] * tint[i] / 256 - o[i]) * bounce / 256;
@@ -1853,11 +1858,16 @@ static void grade_rows(void *context, int y0, int y1)
 				r = grade_curve[0][r] + ((grade_warm[0][r] - grade_curve[0][r]) * warm >> 8);
 				g = grade_curve[1][g] + ((grade_warm[1][g] - grade_curve[1][g]) * warm >> 8);
 				b = grade_curve[2][b] + ((grade_warm[2][b] - grade_curve[2][b]) * warm >> 8);
+			} else if (sprite_pixel(x, y)) {
+				/* a figure takes half the curve: its midtones hold the drawn detail of skin and cloth */
+				r = (r + grade_curve[0][r]) >> 1, g = (g + grade_curve[1][g]) >> 1, b = (b + grade_curve[2][b]) >> 1;
 			} else {
 				r = grade_curve[0][r], g = grade_curve[1][g], b = grade_curve[2][b];
 			}
 			int l = (r * 77 + g * 150 + b * 29) >> 8;
 			int v = vignette_x[x] * vy;
+			if (sprite_pixel(x, y))
+				v = (v + 65536) >> 1; /* the fighters stay readable to the edge of the screen */
 			int o[3] = { l + ((r - l) * 330 >> 8), l + ((g - l) * 330 >> 8), l + ((b - l) * 330 >> 8) };
 			for (int k = 0; k < 3; k++) {
 				o[k] = o[k] * v >> 16;
