@@ -670,7 +670,7 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 			int top = 0, area = 0, flames = 0, flashes = 0, orange = 0, lit_side = 0, pales = 0;
 			int fire = 0, heart = 0, spells = 0, veil = 0, vivid = 0, named = 0, entry = -1, drawn_by_sprite = 0;
 			int bx0 = x, bx1 = x, by0 = y, by1 = y;
-			long rim_luma = 0, rim_count = 0, own_luma = 0, rim_bright = 0;
+			long rim_luma = 0, rim_count = 0, own_luma = 0, rim_bright = 0, rim_figure = 0;
 			long sx = 0, sy = 0, sr = 0, sg = 0, sb = 0;
 			light_stack[top++] = y * WIDTH + x;
 			seen[y][x] = 1;
@@ -718,6 +718,7 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 						int rl = luma_of(at_xy(xx, yy));
 						rim_luma += rl;
 						rim_bright += rl >= 150;
+						rim_figure += sprite_pixel(xx, yy);
 						rim_count++;
 					}
 					if (seen[yy][xx] || !emits[yy][xx])
@@ -729,6 +730,9 @@ static void light_pass(const CoreMotion *m, unsigned height, unsigned out_w)
 			Light l;
 			bool pale = false;
 			const Listed *named_light = named * 2 > area ? &listed[entry] : NULL;
+			if (drawn_by_sprite * 2 > area && rim_figure * 4 > rim_count)
+				continue; /* a patch of a costume, set in the rest of the figure: a fireball
+				           * or a spell flies through the air */
 			if (named_light) {
 				if (area > 6000)
 					continue;
@@ -1555,17 +1559,23 @@ static void blocks(unsigned out_w)
 static uint8_t grade_curve[3][256], grade_warm[3][256];
 static int vignette_x[WIDTH];
 
-static void grade_init(void)
+/* The S curve turns about the scene's own mean brightness, not about middle grey: a dark
+ * stage gains contrast without sinking, a bright one without washing out. The pivot follows
+ * the scene over a few frames, so a flash does not pump the whole picture. */
+static void grade_init(int mean)
 {
-	static bool done;
-	if (done)
+	static int pivot = -1;
+	int target = mean < 40 ? 40 : mean > 150 ? 150 : mean;
+	if (pivot >= 0 && pivot == target)
 		return;
-	done = true;
+	pivot = pivot < 0 ? target : pivot + (target > pivot ? 1 : -1) * (abs(target - pivot) > 3 ? 3 : abs(target - pivot));
+	float p = (float)pivot / 255.0f;
 	for (int v = 0; v < 256; v++) {
 		float t = (float)v / 255.0f;
-		float s = t * 0.6f + t * t * (3.0f - 2.0f * t) * 0.4f;
+		float g = t <= p ? p * __builtin_powf(t / p, 1.4f) : 1.0f - (1.0f - p) * __builtin_powf((1.0f - t) / (1.0f - p), 1.4f);
+		float s = t * 0.45f + g * 0.55f;
 		float low = t * (1.0f - t) * (1.0f - t) * 4.0f, high = t * t * (1.0f - t) * 4.0f;
-		float shift[3] = { 0.05f * high - 0.03f * low, 0.015f * high, 0.065f * low - 0.045f * high };
+		float shift[3] = { 0.05f * high - 0.015f * low, 0.015f * high, 0.03f * low - 0.045f * high };
 		/* near a fire the shadows keep the light's warmth instead of turning cool, and do not
 		 * sink: the light multiplies them, so its pool keeps its reach */
 		float warm[3] = { 0.05f * high + 0.03f * low, 0.015f * high + 0.01f * low, -0.045f * high - 0.03f * low };
@@ -1882,7 +1892,6 @@ static void grade_rows(void *context, int y0, int y1)
  * enough that a step per console pixel never shows. */
 static void grade_pass(const CoreMotion *m, int h)
 {
-	grade_init();
 	find_room(m, h);
 	long sum[3] = { 0, 0, 0 }, n = 0;
 	for (int y = 0; y < h; y++) {
@@ -1901,13 +1910,14 @@ static void grade_pass(const CoreMotion *m, int h)
 	}
 	int fog[7];
 	find_depth(fog);
-	int air[3] = { 0, 0, 0 };
+	int air[3] = { 0, 0, 0 }, l = 90;
 	if (n) {
 		int mean[3] = { (int)(sum[0] / n), (int)(sum[1] / n), (int)(sum[2] / n) };
-		int l = (mean[0] * 77 + mean[1] * 150 + mean[2] * 29) >> 8;
+		l = (mean[0] * 77 + mean[1] * 150 + mean[2] * 29) >> 8;
 		for (int c = 0; c < 3; c++)
 			air[c] = (l + mean[c]) / 2 + 36 > 255 ? 255 : (l + mean[c]) / 2 + 36;
 	}
+	grade_init(l);
 	Grade gr = { m, h, (int)n, { 0 }, { air[0], air[1], air[2] } };
 	memcpy(gr.fog, fog, sizeof fog);
 	remaster_bands(h, grade_rows, &gr);
