@@ -1,6 +1,7 @@
 __pycache__/
 *.egg-info/
 .venv/
+.build/
 dist/
 .DS_Store
 
@@ -35,3 +36,26 @@ build/
 *.pbp
 *.keystore
 *.jks
+*.nds
+*.3ds
+*.cci
+*.cxi
+*.gcm
+*.iso
+*.rvz
+*.wbfs
+*.wud
+*.wux
+*.wua
+*.nsp
+*.xci
+*.nro
+*.cso
+*.keys
+*.firm
+*.elf
+*.self
+*.sprx
+*.xex
+*.nso
+*.nca

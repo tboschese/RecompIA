@@ -21,8 +21,10 @@ from . import macapp
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="remasteria", description="Gera o remaster de um jogo a partir da pasta do projeto e da ROM.")
+    parser = argparse.ArgumentParser(prog="remasteria", description="Projetos de recompilação nativa de jogos para macOS.")
     sub = parser.add_subparsers(dest="command", required=True)
+    library = sub.add_parser("library", help="compila a ferramenta de recompilação para Mac (Switch, PS2, PS3 e Xbox 360)")
+    library.add_argument("--dist", type=Path, default=Path("dist"), help="pasta de saída (padrão: dist)")
     mac = sub.add_parser("mac", help="gera o aplicativo para macOS")
     mac.add_argument("game", type=Path, help="pasta do projeto (games/<jogo>)")
     mac.add_argument("rom", type=Path, help="a sua ROM do jogo")
@@ -87,7 +89,11 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        if args.command == "mac":
+        if args.command == "library":
+            from . import maclibrary
+            bundle = maclibrary.build(args.dist)
+            print(f'pronto: {bundle}\n  abra com: open "{bundle}"')
+        elif args.command == "mac":
             bundle = macapp.build(args.game, args.rom, args.dist)
             print(f"pronto: {bundle}\n  abra com: open \"{bundle}\"")
         elif args.command == "lights":
